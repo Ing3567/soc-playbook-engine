@@ -1,0 +1,16 @@
+version: '3'
+
+tasks:
+  start:
+    desc: "รัน SOC Simulator ทั้งระบบ"
+    deps: [backend, frontend]
+
+  backend:
+    dir: backend
+    cmds:
+      - go run .
+
+  frontend:
+    dir: frontend
+    cmds:
+      - npm run dev
