@@ -2,7 +2,14 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+)
+
+var (
+	vtWordRegex    = regexp.MustCompile(`\b(virustotal|vt)\b`)
+	blockWordRegex = regexp.MustCompile(`\b(block|firewall)\b`)
+	ticketWordRegex = regexp.MustCompile(`\b(ticket|tier)\b`)
 )
 
 type graphState struct {
@@ -21,18 +28,22 @@ func MatchToolByKeywords(nodeType, label string) string {
 	lower := strings.ToLower(label)
 	switch nodeType {
 	case "lookup":
-		if strings.Contains(lower, "virustotal") || strings.Contains(lower, "vt") {
+		if vtWordRegex.MatchString(lower) {
 			return "virustotal"
+		}
+		if strings.Contains(lower, "abuseipdb") {
+			return "abuseipdb"
 		}
 		if strings.Contains(lower, "jira") || strings.Contains(lower, "เคสเก่า") {
 			return "jira_search"
 		}
-		return "abuseipdb"
+		return "manual_lookup"
 	case "action":
-		if strings.Contains(lower, "บล็อก") || strings.Contains(lower, "ระงับ") || strings.Contains(lower, "block") || strings.Contains(lower, "firewall") {
+		if strings.Contains(lower, "บล็อก") || strings.Contains(lower, "ระงับ") || blockWordRegex.MatchString(lower) {
 			return "firewall_block"
 		}
-		if strings.Contains(lower, "ticket") || strings.Contains(lower, "เคส") || strings.Contains(lower, "tier") {
+		isCloseCase := strings.Contains(lower, "ปิดเคส") && !strings.Contains(lower, "เปิดเคส")
+		if ticketWordRegex.MatchString(lower) || strings.Contains(lower, "เปิดเคส") || (strings.Contains(lower, "เคส") && !isCloseCase) {
 			return "jira_ticket"
 		}
 		return "manual_action"
@@ -113,6 +124,62 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 func BuildCustomFlowchart(steps []Step) ([]Node, []Edge) {
 	state := &graphState{}
 	startID := state.appendNode("terminal", "เริ่ม")
-	state.connectNodes(startID, state.buildStepSequence(steps, ""), "")
-	return state.nodes, state.edges
+	endID := state.appendNode("terminal", "จบ")
+	state.connectNodes(startID, state.buildStepSequence(steps, endID), "")
+
+	endHasIncoming := false
+	for _, e := range state.edges {
+		if e.Target == endID {
+			endHasIncoming = true
+			break
+		}
+	}
+	if !endHasIncoming {
+		filtered := make([]Node, 0, len(state.nodes)-1)
+		for _, n := range state.nodes {
+			if n.ID != endID {
+				filtered = append(filtered, n)
+			}
+		}
+		state.nodes = filtered
+	}
+
+	return sortNodesTopological(state.nodes, state.edges, startID), state.edges
+}
+
+func sortNodesTopological(nodes []Node, edges []Edge, startID string) []Node {
+	nodeMap := make(map[string]Node, len(nodes))
+	for _, n := range nodes {
+		nodeMap[n.ID] = n
+	}
+	adj := make(map[string][]string)
+	for _, e := range edges {
+		adj[e.Source] = append(adj[e.Source], e.Target)
+	}
+
+	visited := make(map[string]bool, len(nodes))
+	ordered := make([]Node, 0, len(nodes))
+	queue := []string{startID}
+	visited[startID] = true
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		if n, ok := nodeMap[curr]; ok {
+			ordered = append(ordered, n)
+		}
+		for _, next := range adj[curr] {
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	for _, n := range nodes {
+		if !visited[n.ID] {
+			ordered = append(ordered, n)
+		}
+	}
+	return ordered
 }
