@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -29,17 +31,24 @@ var (
 
 func ConvertLinesToSteps(lines []Line) ([]Step, string) {
 	provider := strings.ToLower(Config.LlmProvider)
+	var llmErr error
 	switch provider {
 	case "fallback", "none":
 		return ParseLinesByIndentation(lines), "fallback"
 	case "hf_api":
-		if steps, err := queryHuggingFaceChatAPI(lines); err == nil {
+		var steps []Step
+		if steps, llmErr = queryHuggingFaceChatAPI(lines); llmErr == nil {
 			return steps, "hf_api:" + Config.LlmModel
 		}
 	case "colab_ollama", "ollama":
-		if steps, err := queryOllamaGenerateAPI(lines); err == nil {
+		var steps []Step
+		if steps, llmErr = queryOllamaGenerateAPI(lines); llmErr == nil {
 			return steps, provider + ":" + Config.LlmModel
 		}
+	}
+	if llmErr != nil {
+		log.Printf("LLM (%s) failed, using fallback parser: %v", provider, llmErr)
+		return ParseLinesByIndentation(lines), fmt.Sprintf("fallback (reason: %v)", llmErr)
 	}
 	return ParseLinesByIndentation(lines), "fallback"
 }
@@ -65,6 +74,9 @@ func queryOllamaGenerateAPI(lines []Line) ([]Step, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ollama HTTP %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Response string `json:"response"`
@@ -101,6 +113,9 @@ func queryHuggingFaceChatAPI(lines []Line) ([]Step, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("hf_api HTTP %d", resp.StatusCode)
+	}
 
 	var chat struct {
 		Choices []struct {
@@ -133,9 +148,11 @@ func extractStepsFromJSON(raw string) ([]Step, error) {
 
 func inferStepType(text string) string {
 	lower := strings.ToLower(text)
-	for _, kw := range []string{"ปิดเคส", "close case"} {
-		if strings.Contains(lower, kw) {
-			return "end"
+	if !strings.Contains(lower, "เปิดเคส") {
+		for _, kw := range []string{"ปิดเคส", "close case"} {
+			if strings.Contains(lower, kw) {
+				return "end"
+			}
 		}
 	}
 	for _, kw := range []string{"virustotal", "reputation", "jira", "เคสเก่า", "ค้นหา", "ตรวจสอบ"} {
