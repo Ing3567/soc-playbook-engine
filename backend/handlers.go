@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -54,7 +55,11 @@ func (h *ApiHandler) GenerateFlowchart(c *gin.Context) {
 			return
 		}
 		defer f.Close()
-		data, _ := io.ReadAll(io.LimitReader(f, 10<<20))
+		data, err := io.ReadAll(io.LimitReader(f, 10<<20))
+		if err != nil {
+			fail(http.StatusBadRequest, "อ่านไฟล์ไม่สำเร็จ")
+			return
+		}
 		if lines, err = ExtractLinesFromDocx(data); err != nil {
 			fail(http.StatusBadRequest, "ไฟล์ไม่ใช่ Word (.docx) ที่ถูกต้อง")
 			return
@@ -112,6 +117,10 @@ func (h *ApiHandler) DeletePlaybook(c *gin.Context) {
 	defer cancel()
 	id := c.Param("id")
 	if err := h.repo.DeleteOne(ctx, id); err != nil {
+		if errors.Is(err, ErrPlaybookNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Playbook นี้"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ลบไม่สำเร็จ"})
 		return
 	}

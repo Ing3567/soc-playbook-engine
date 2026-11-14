@@ -2,30 +2,42 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// ErrPlaybookNotFound is returned when a playbook with the given ID does not exist.
+var ErrPlaybookNotFound = errors.New("playbook not found")
+
 type PlaybookRepository struct {
+	client     *mongo.Client
 	collection *mongo.Collection
 }
 
 func NewPlaybookRepository(ctx context.Context, uri, dbName string) (*PlaybookRepository, error) {
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		return nil, err
 	}
 	if err := client.Ping(ctx, nil); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, err
 	}
 	return &PlaybookRepository{
+		client:     client,
 		collection: client.Database(dbName).Collection("playbooks"),
 	}, nil
+}
+
+// Ping checks that MongoDB is still reachable (used by /api/health).
+func (r *PlaybookRepository) Ping(ctx context.Context) error {
+	return r.client.Ping(ctx, nil)
 }
 
 func (r *PlaybookRepository) ListAll(ctx context.Context) ([]PlaybookDocument, error) {
@@ -56,6 +68,12 @@ func (r *PlaybookRepository) SaveOne(ctx context.Context, doc PlaybookDocument) 
 }
 
 func (r *PlaybookRepository) DeleteOne(ctx context.Context, id string) error {
-	_, err := r.collection.DeleteOne(ctx, bson.M{"_id": id})
-	return err
+	res, err := r.collection.DeleteOne(ctx, bson.M{"_id": id})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return ErrPlaybookNotFound
+	}
+	return nil
 }
