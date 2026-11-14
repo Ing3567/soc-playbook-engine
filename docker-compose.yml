@@ -1,0 +1,30 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: soc-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional local LLM. Start with: docker compose --profile llm up -d
+  # Then pull a model once:   docker exec -it soc-ollama ollama pull qwen2.5:3b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: soc-ollama
+    profiles: ["llm"]
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  mongo-data:
+  ollama-data:
