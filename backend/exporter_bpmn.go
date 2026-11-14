@@ -82,13 +82,18 @@ func BuildBpmnXML(title string, nodes []Node, edges []Edge) ([]byte, error) {
 	depths := calculateGraphDepths(nodes, edges)
 	colsByDepth := make(map[int]int)
 
+	inDegree := make(map[string]int, len(nodes))
+	for _, e := range edges {
+		inDegree[e.Target]++
+	}
+
 	for _, n := range nodes {
 		d := depths[n.ID]
 		col := colsByDepth[d]
 		colsByDepth[d] = col + 1
 
 		x, y, w, h := 160+(col*220), 80+(d*130), 120, 80
-		if n.Type == "terminal" && n.Label == "เริ่ม" {
+		if n.Type == "terminal" && inDegree[n.ID] == 0 {
 			process.StartEvents = append(process.StartEvents, BpmnNodeElement{ID: n.ID, Name: n.Label})
 			w, h = 36, 36
 		} else if n.Type == "terminal" || n.Type == "end" {
