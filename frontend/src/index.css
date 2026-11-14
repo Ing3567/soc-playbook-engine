@@ -1,2 +1,16 @@
 @import "tailwindcss";
-html, body, #root { height: 100%; margin: 0; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-canvas {
+    width: 100vw !important;
+    height: 100vh !important;
+  }
+}
