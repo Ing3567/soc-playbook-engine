@@ -28,6 +28,7 @@ export function FlowNodeCard({ data }: NodeProps) {
   let ringStyle = ''
   if (status === 'running') ringStyle = 'ring-4 ring-blue-400 animate-pulse'
   if (status === 'success') ringStyle = 'ring-4 ring-emerald-500'
+  if (status === 'failed') ringStyle = 'ring-4 ring-rose-500'
 
   const canRun = nodeType === 'lookup' || nodeType === 'action'
 

@@ -31,7 +31,11 @@ export async function savePlaybook(payload: Omit<PlaybookItem, 'updated_at'>): P
 }
 
 export async function deletePlaybook(id: string) {
-  await fetch(`/api/sops/${id}`, { method: 'DELETE' })
+  const res = await fetch(`/api/sops/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || 'ลบไม่สำเร็จ')
+  }
 }
 
 export async function executeStep(node: FlowNode) {
@@ -64,11 +68,12 @@ export async function downloadExportFile(
   if (!res.ok) throw new Error('ส่งออกไฟล์ไม่สำเร็จ')
   const content = await res.text()
   const extMap = { bpmn: '.bpmn', cacao: '.cacao.json', markdown: '.md' }
+  const safeName = (title || 'playbook').replace(/[<>:"/\\|?*]+/g, '_').trim() || 'playbook'
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `${title || 'playbook'}${extMap[format]}`
+  link.download = `${safeName}${extMap[format]}`
   link.click()
   URL.revokeObjectURL(url)
 }

@@ -96,35 +96,65 @@ export default function App() {
     reloadPlaybooks()
   }, [reloadPlaybooks])
 
-  const runNode = useCallback(async (nodeId: string) => {
-    const target = nodesRef.current.find((n) => n.id === nodeId)
-    if (!target) return
-    setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
-    try {
-      const res = await executeStep(target)
-      setStatuses((prev) => ({ ...prev, [nodeId]: 'success' }))
-      setLogs((prev) => [
-        {
-          node_id: target.id,
-          label: target.label,
-          status: 'success',
-          duration_ms: res.duration_ms,
-          timestamp: res.timestamp,
-          output: res.output,
-        },
-        ...prev,
-      ])
-    } catch {
-      setStatuses((prev) => ({ ...prev, [nodeId]: 'failed' }))
-    }
-  }, [])
+  const runNode = useCallback(
+    async (nodeId: string): Promise<{ ok: boolean; output: Record<string, unknown> | null }> => {
+      const target = nodesRef.current.find((n) => n.id === nodeId)
+      if (!target) return { ok: false, output: null }
+      setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
+      try {
+        const res = await executeStep(target)
+        const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
+        setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
+        setLogs((prev) => [
+          {
+            node_id: target.id,
+            label: target.label,
+            status: nextStatus,
+            duration_ms: res.duration_ms,
+            timestamp: res.timestamp,
+            output: res.output,
+          },
+          ...prev,
+        ])
+        return { ok: nextStatus === 'success', output: res.output ?? null }
+      } catch (e) {
+        setStatuses((prev) => ({ ...prev, [nodeId]: 'failed' }))
+        setLogs((prev) => [
+          {
+            node_id: target.id,
+            label: target.label,
+            status: 'failed',
+            duration_ms: 0,
+            timestamp: new Date().toTimeString().slice(0, 8),
+            output: { error: e instanceof Error ? e.message : 'Execution failed' },
+          },
+          ...prev,
+        ])
+        return { ok: false, output: null }
+      }
+    },
+    []
+  )
 
   useEffect(() => {
-    if (nodes.length === 0) return
-    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(nodes, edges, statuses, runNode)
+    if (nodes.length === 0) {
+      setRfNodes([])
+      setRfEdges([])
+      return
+    }
+    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(nodes, edges, {}, runNode)
     setRfNodes(nextN)
     setRfEdges(nextE)
-  }, [nodes, edges, statuses, runNode, setRfNodes, setRfEdges])
+  }, [nodes, edges, runNode, setRfNodes, setRfEdges])
+
+  useEffect(() => {
+    setRfNodes((prev) =>
+      prev.map((n) => ({
+        ...n,
+        data: { ...n.data, status: statuses[n.id] || 'idle' },
+      }))
+    )
+  }, [statuses, setRfNodes])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
@@ -175,11 +205,57 @@ export default function App() {
     }
   }
 
+  function pickDecisionEdge(outEdges: FlowEdge[], lastOutput: Record<string, unknown> | null): FlowEdge | undefined {
+    if (outEdges.length === 0) return undefined
+    if (outEdges.length === 1) return outEdges[0]
+
+    const isPositive =
+      lastOutput != null &&
+      ((typeof lastOutput.malicious_count === 'number' && lastOutput.malicious_count > 0) ||
+        (typeof lastOutput.confidence_score === 'number' && lastOutput.confidence_score >= 50) ||
+        (Array.isArray(lastOutput.matched_cases) && lastOutput.matched_cases.length > 0))
+
+    if (isPositive) {
+      return outEdges.find((e) => e.label === 'ใช่' || e.label?.toLowerCase() === 'yes') ?? outEdges[0]
+    }
+    return outEdges.find((e) => e.label === 'ไม่ใช่' || e.label?.toLowerCase() === 'no') ?? outEdges[outEdges.length - 1]
+  }
+
   async function handleRunAll() {
-    for (const n of nodes) {
-      if (n.type === 'lookup' || n.type === 'action') {
-        await runNode(n.id)
+    if (nodes.length === 0) return
+    setStatuses({})
+
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+    const outgoing = new Map<string, FlowEdge[]>()
+    const inDegree = new Map<string, number>()
+    for (const n of nodes) inDegree.set(n.id, 0)
+    for (const e of edges) {
+      const list = outgoing.get(e.source) ?? []
+      list.push(e)
+      outgoing.set(e.source, list)
+      inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1)
+    }
+
+    const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
+    const visited = new Set<string>()
+    let current: FlowNode | undefined = startNode
+    let lastOutput: Record<string, unknown> | null = null
+
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id)
+      const outEdges = outgoing.get(current.id) ?? []
+
+      if (current.type === 'lookup' || current.type === 'action') {
+        const res = await runNode(current.id)
+        if (!res.ok) break
+        lastOutput = res.output
+      } else if (current.type === 'end') {
+        break
       }
+
+      const nextEdge =
+        current.type === 'decision' ? pickDecisionEdge(outEdges, lastOutput) : outEdges[0]
+      current = nextEdge ? nodeMap.get(nextEdge.target) : undefined
     }
   }
 
@@ -194,6 +270,12 @@ export default function App() {
               setSopId('')
               setTitle('New SOP')
               setText(SAMPLE_SOP)
+              setEngine('-')
+              setNodes([])
+              setEdges([])
+              setStatuses({})
+              setLogs([])
+              setError('')
             }}
             className="text-xs text-blue-600 hover:underline"
           >
@@ -308,8 +390,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={async () => {
-                    await deletePlaybook(item.id)
-                    reloadPlaybooks()
+                    if (!window.confirm(`ลบ "${item.title}" ใช่หรือไม่?`)) return
+                    try {
+                      await deletePlaybook(item.id)
+                      reloadPlaybooks()
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : 'ลบไม่สำเร็จ')
+                    }
                   }}
                   className="ml-2 text-rose-500 font-bold"
                 >
