@@ -1,30 +1,36 @@
 services:
-  mongo:
+  mongodb:
     image: mongo:7
     container_name: soc-mongo
     restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - mongo_data:/data/db
 
-  # Optional local LLM. Start with: docker compose --profile llm up -d
-  # Then pull a model once:   docker exec -it soc-ollama ollama pull qwen2.5:3b
-  ollama:
-    image: ollama/ollama:latest
-    container_name: soc-ollama
-    profiles: ["llm"]
+  backend:
+    build: ./backend
+    container_name: soc-backend
     restart: unless-stopped
     ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+    depends_on:
+      - mongodb
+
+  frontend:
+    build: ./frontend
+    container_name: soc-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_TARGET=http://backend:8080
+    depends_on:
+      - backend
 
 volumes:
-  mongo-data:
-  ollama-data:
+  mongo_data:

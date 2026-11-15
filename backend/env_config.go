@@ -19,7 +19,7 @@ type AppConfig struct {
 var Config AppConfig
 
 func LoadEnvConfig() {
-	readDotEnvFile(".env")
+	readDotEnvFile("//.env")
 	Config = AppConfig{
 		Port:        getEnvOrDefault("PORT", "8080"),
 		MongoURI:    getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
