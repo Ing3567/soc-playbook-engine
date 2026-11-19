@@ -13,11 +13,12 @@ import (
 )
 
 type ApiHandler struct {
-	repo *PlaybookRepository
+	repo     *PlaybookRepository
+	toolRepo *ToolRepository
 }
 
-func NewApiHandler(repo *PlaybookRepository) *ApiHandler {
-	return &ApiHandler{repo: repo}
+func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository) *ApiHandler {
+	return &ApiHandler{repo: repo, toolRepo: toolRepo}
 }
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
@@ -25,6 +26,10 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/api/sops", h.ListPlaybooks)
 	r.POST("/api/sops", h.SavePlaybook)
 	r.DELETE("/api/sops/:id", h.DeletePlaybook)
+	r.GET("/api/tools", h.ListTools)
+	r.POST("/api/tools", h.CreateTool)
+	r.PUT("/api/tools/:id", h.UpdateTool)
+	r.DELETE("/api/tools/:id", h.DeleteTool)
 	r.POST("/api/execute", h.ExecuteStep)
 	r.POST("/api/export/bpmn", h.ExportBpmn)
 	r.POST("/api/export/cacao", h.ExportCacao)
@@ -80,9 +85,121 @@ func (h *ApiHandler) GenerateFlowchart(c *gin.Context) {
 		return
 	}
 
-	steps, engine := ConvertLinesToSteps(lines)
-	nodes, edges := BuildCustomFlowchart(steps)
+	tools := h.loadEnabledTools(c.Request.Context())
+	steps, engine := ConvertLinesToSteps(lines, tools)
+	nodes, edges := BuildCustomFlowchart(steps, tools)
 	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "edges": edges, "engine": engine, "lines": lines})
+}
+
+func (h *ApiHandler) loadEnabledTools(parentCtx context.Context) []ToolDefinition {
+	if h.toolRepo == nil {
+		return DefaultBuiltinTools()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	defer cancel()
+	tools, err := h.toolRepo.ListEnabled(ctx)
+	if err != nil {
+		return DefaultBuiltinTools()
+	}
+	return tools
+}
+
+func (h *ApiHandler) loadToolMap(parentCtx context.Context) map[string]ToolDefinition {
+	result := make(map[string]ToolDefinition)
+	if h.toolRepo == nil {
+		for _, t := range DefaultBuiltinTools() {
+			result[t.ID] = t
+		}
+		return result
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	defer cancel()
+	tools, err := h.toolRepo.ListAll(ctx)
+	if err != nil {
+		for _, t := range DefaultBuiltinTools() {
+			result[t.ID] = t
+		}
+		return result
+	}
+	for _, t := range tools {
+		result[t.ID] = t
+	}
+	return result
+}
+
+func (h *ApiHandler) ListTools(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	items, err := h.toolRepo.ListAll(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงรายการ Tools จาก MongoDB ไม่สำเร็จ"})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (h *ApiHandler) CreateTool(c *gin.Context) {
+	var input ToolDefinition
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูล Tool ไม่ถูกต้อง"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	created, err := h.toolRepo.Create(ctx, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidTool):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, ErrToolAlreadyExists):
+			c.JSON(http.StatusConflict, gin.H{"error": "Tool ID นี้มีอยู่แล้ว"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "สร้าง Tool ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
+
+func (h *ApiHandler) UpdateTool(c *gin.Context) {
+	var input ToolDefinition
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูล Tool ไม่ถูกต้อง"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	updated, err := h.toolRepo.Update(ctx, c.Param("id"), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrToolNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Tool นี้"})
+		case errors.Is(err, ErrInvalidTool):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "อัปเดต Tool ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *ApiHandler) DeleteTool(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	id := c.Param("id")
+	if err := h.toolRepo.Delete(ctx, id); err != nil {
+		switch {
+		case errors.Is(err, ErrToolNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Tool นี้"})
+		case errors.Is(err, ErrBuiltinToolProtected):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่สามารถลบ Built-in Tool ได้ (สามารถปิดการใช้งานแทนได้)"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ลบ Tool ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": id})
 }
 
 func (h *ApiHandler) ListPlaybooks(c *gin.Context) {
@@ -133,7 +250,15 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "คำสั่งรันไม่ถูกต้อง"})
 		return
 	}
-	c.JSON(http.StatusOK, RunSandboxStep(req))
+	var toolDef *ToolDefinition
+	if h.toolRepo != nil && req.Tool != "" && req.Tool != "none" {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		if def, err := h.toolRepo.GetByID(ctx, req.Tool); err == nil {
+			toolDef = def
+		}
+	}
+	c.JSON(http.StatusOK, RunSandboxStep(req, toolDef))
 }
 
 func (h *ApiHandler) ExportBpmn(c *gin.Context) {
@@ -156,7 +281,8 @@ func (h *ApiHandler) ExportCacao(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่มีข้อมูลกราฟ"})
 		return
 	}
-	data, err := BuildCacaoJSON(req.Title, req.Nodes, req.Edges)
+	toolMap := h.loadToolMap(c.Request.Context())
+	data, err := BuildCacaoJSON(req.Title, req.Nodes, req.Edges, toolMap)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "แปลง CACAO ไม่สำเร็จ"})
 		return

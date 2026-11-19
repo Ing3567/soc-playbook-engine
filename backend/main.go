@@ -19,8 +19,13 @@ func main() {
 		log.Fatalf("MongoDB error: %v", err)
 	}
 
+	toolRepo := NewToolRepository(repo.Database())
+	if err := toolRepo.EnsureBuiltinTools(ctx); err != nil {
+		log.Fatalf("Tool seeding error: %v", err)
+	}
+
 	router := gin.Default()
-	handler := NewApiHandler(repo)
+	handler := NewApiHandler(repo, toolRepo)
 	handler.RegisterRoutes(router)
 
 	if err := router.Run(":" + Config.Port); err != nil {
