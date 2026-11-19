@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import {
   ReactFlow,
   Background,
@@ -39,9 +39,9 @@ function buildGraphLayout(
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', nodesep: 55, ranksep: 70 })
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: 240, height: 94 }))
+  nodes.forEach((n) => g.setNode(n.id, { width: 240, height: 116 }))
   edges.forEach((e) => g.setEdge(e.source, e.target))
   dagre.layout(g)
 
@@ -50,7 +50,7 @@ function buildGraphLayout(
     return {
       id: n.id,
       type: 'socNode',
-      position: { x: (pos?.x ?? 0) - 120, y: (pos?.y ?? 0) - 47 },
+      position: { x: (pos?.x ?? 0) - 120, y: (pos?.y ?? 0) - 58 },
       data: {
         ...n,
         status: statuses[n.id] || 'idle',
@@ -83,6 +83,7 @@ export default function App() {
   const [edges, setEdges] = useState<FlowEdge[]>([])
   const [savedList, setSavedList] = useState<PlaybookItem[]>([])
   const [tools, setTools] = useState<ToolDefinition[]>([])
+  const [toolsLoadError, setToolsLoadError] = useState('')
   const [toolModalOpen, setToolModalOpen] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
@@ -103,7 +104,13 @@ export default function App() {
   }, [])
 
   const reloadTools = useCallback(async () => {
-    setTools(await getTools())
+    try {
+      const list = await getTools()
+      setTools(list)
+      setToolsLoadError('')
+    } catch (e) {
+      setToolsLoadError(e instanceof Error ? e.message : 'โหลดรายการ Tools ไม่สำเร็จ')
+    }
   }, [])
 
   useEffect(() => {
@@ -222,7 +229,7 @@ export default function App() {
     await submitGenerate(form)
   }
 
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileUpload(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
@@ -393,21 +400,33 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => downloadExportFile('bpmn', title, nodes, edges)}
+              onClick={() =>
+                downloadExportFile('bpmn', title, nodes, edges).catch((e) =>
+                  setError(e instanceof Error ? e.message : 'ส่งออก BPMN ไม่สำเร็จ')
+                )
+              }
               className="rounded bg-amber-600 py-1.5 text-[11px] font-semibold text-white hover:bg-amber-700"
             >
               2. BPMN 2.0 XML
             </button>
             <button
               type="button"
-              onClick={() => downloadExportFile('markdown', title, nodes, edges)}
+              onClick={() =>
+                downloadExportFile('markdown', title, nodes, edges).catch((e) =>
+                  setError(e instanceof Error ? e.message : 'ส่งออก Markdown ไม่สำเร็จ')
+                )
+              }
               className="rounded bg-purple-600 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-700"
             >
               3. Markdown (.md)
             </button>
             <button
               type="button"
-              onClick={() => downloadExportFile('cacao', title, nodes, edges)}
+              onClick={() =>
+                downloadExportFile('cacao', title, nodes, edges).catch((e) =>
+                  setError(e instanceof Error ? e.message : 'ส่งออก CACAO ไม่สำเร็จ')
+                )
+              }
               className="rounded bg-teal-600 py-1.5 text-[11px] font-semibold text-white hover:bg-teal-700"
             >
               4. OASIS CACAO
@@ -496,6 +515,7 @@ export default function App() {
       <ToolManagerModal
         open={toolModalOpen}
         tools={tools}
+        loadError={toolsLoadError}
         onClose={() => setToolModalOpen(false)}
         onChanged={reloadTools}
       />
