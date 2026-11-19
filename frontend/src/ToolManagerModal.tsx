@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, type FormEvent } from 'react'
 import type { ToolCategory, ToolCommandType, ToolDefinition, ToolPayload } from './types'
 import { createTool, updateTool, deleteTool } from './api'
 
 interface ToolManagerModalProps {
   open: boolean
   tools: ToolDefinition[]
+  loadError?: string
   onClose: () => void
   onChanged: () => Promise<void>
 }
@@ -43,7 +44,7 @@ function slugifyName(name: string): string {
     .replace(/^_+|_+$/g, '')
 }
 
-export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManagerModalProps) {
+export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }: ToolManagerModalProps) {
   const [filterCat, setFilterCat] = useState<'all' | ToolCategory>('all')
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -52,16 +53,26 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
 
+  useEffect(() => {
+    if (!open) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [open, onClose])
+
   const filteredTools = useMemo(() => {
     const q = search.trim().toLowerCase()
     return tools.filter((t) => {
       if (filterCat !== 'all' && t.category !== filterCat) return false
       if (!q) return true
+      const keywords = Array.isArray(t.keywords) ? t.keywords : []
       return (
-        t.name.toLowerCase().includes(q) ||
-        t.id.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
-        t.keywords.some((k) => k.toLowerCase().includes(q))
+        (t.name || '').toLowerCase().includes(q) ||
+        (t.id || '').toLowerCase().includes(q) ||
+        (t.description || '').toLowerCase().includes(q) ||
+        keywords.some((k) => k.toLowerCase().includes(q))
       )
     })
   }, [tools, filterCat, search])
@@ -83,7 +94,7 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
       name: tool.name,
       category: tool.category,
       description: tool.description,
-      keywordsText: (tool.keywords || []).join(', '),
+      keywordsText: (Array.isArray(tool.keywords) ? tool.keywords : []).join(', '),
       command_type: tool.command_type || 'http-api',
       endpoint: tool.endpoint || '',
       mockOutputText:
@@ -103,8 +114,8 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
         name: tool.name,
         category: tool.category,
         description: tool.description,
-        keywords: tool.keywords || [],
-        command_type: tool.command_type,
+        keywords: Array.isArray(tool.keywords) ? tool.keywords : [],
+        command_type: tool.command_type || 'http-api',
         endpoint: tool.endpoint || '',
         mock_output: tool.mock_output,
         enabled: !tool.enabled,
@@ -130,7 +141,7 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setFormError('')
 
@@ -184,9 +195,14 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl border border-slate-200">
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3 bg-slate-50">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
+      <div className="flex h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl border border-slate-200">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-3 bg-slate-50">
           <div>
             <h2 className="text-base font-bold text-slate-900">จัดการ SOC Tools & AI Mapping Catalog</h2>
             <p className="text-xs text-slate-500">
@@ -202,9 +218,22 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
           </button>
         </div>
 
-        <div className="grid flex-1 grid-cols-1 md:grid-cols-12 overflow-hidden">
-          <div className="md:col-span-7 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 overflow-hidden">
-            <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3 bg-white">
+        {loadError && (
+          <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800 flex items-center justify-between gap-2">
+            <span>{loadError}</span>
+            <button
+              type="button"
+              onClick={() => void onChanged()}
+              className="rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold hover:bg-amber-100"
+            >
+              ลองโหลดใหม่
+            </button>
+          </div>
+        )}
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-12 overflow-y-auto md:overflow-hidden">
+          <div className="md:col-span-7 flex min-h-0 flex-col border-b md:border-b-0 md:border-r border-slate-200 md:overflow-hidden">
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 p-3 bg-white">
               <div className="flex rounded-lg border border-slate-200 bg-slate-100 p-0.5 text-xs font-semibold">
                 {(['all', 'lookup', 'action'] as const).map((cat) => (
                   <button
@@ -235,85 +264,88 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/60">
-              {filteredTools.map((t) => (
-                <div
-                  key={t.id}
-                  className={`rounded-lg border p-3 bg-white transition ${
-                    editingId === t.id ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200'
-                  } ${!t.enabled ? 'opacity-60' : ''}`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm font-bold text-slate-900">{t.name}</span>
-                        <code className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">{t.id}</code>
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                            t.category === 'lookup' ? 'bg-sky-100 text-sky-800' : 'bg-indigo-100 text-indigo-800'
-                          }`}
-                        >
-                          {t.category}
-                        </span>
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                            t.is_builtin ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {t.is_builtin ? 'Built-in' : 'Custom'}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-slate-600">{t.description}</p>
-                      {t.keywords?.length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {t.keywords.map((kw) => (
-                            <span key={kw} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-700">
-                              {kw}
-                            </span>
-                          ))}
+            <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/60">
+              {filteredTools.map((t) => {
+                const keywords = Array.isArray(t.keywords) ? t.keywords : []
+                return (
+                  <div
+                    key={t.id}
+                    className={`rounded-lg border p-3 bg-white transition ${
+                      editingId === t.id ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200'
+                    } ${!t.enabled ? 'opacity-60' : ''}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-bold text-slate-900">{t.name}</span>
+                          <code className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">{t.id}</code>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                              t.category === 'lookup' ? 'bg-sky-100 text-sky-800' : 'bg-indigo-100 text-indigo-800'
+                            }`}
+                          >
+                            {t.category}
+                          </span>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                              t.is_builtin ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {t.is_builtin ? 'Built-in' : 'Custom'}
+                          </span>
                         </div>
-                      )}
-                    </div>
+                        <p className="mt-1 text-xs text-slate-600">{t.description}</p>
+                        {keywords.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            {keywords.map((kw) => (
+                              <span key={kw} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-700">
+                                {kw}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
 
-                    <div className="flex flex-col items-end gap-1.5 shrink-0">
-                      <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={t.enabled}
-                          onChange={() => handleToggleEnabled(t)}
-                          className="accent-blue-600"
-                        />
-                        {t.enabled ? 'Enabled' : 'Disabled'}
-                      </label>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => startEdit(t)}
-                          className="rounded border border-slate-300 px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                        >
-                          แก้ไข
-                        </button>
-                        {!t.is_builtin && (
+                      <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={t.enabled}
+                            onChange={() => void handleToggleEnabled(t)}
+                            className="accent-blue-600"
+                          />
+                          {t.enabled ? 'Enabled' : 'Disabled'}
+                        </label>
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleDelete(t)}
-                            className="rounded border border-rose-200 px-2 py-0.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-50"
+                            onClick={() => startEdit(t)}
+                            className="rounded border border-slate-300 px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
                           >
-                            ลบ
+                            แก้ไข
                           </button>
-                        )}
+                          {!t.is_builtin && (
+                            <button
+                              type="button"
+                              onClick={() => void handleDelete(t)}
+                              className="rounded border border-rose-200 px-2 py-0.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-50"
+                            >
+                              ลบ
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
               {filteredTools.length === 0 && (
                 <div className="py-8 text-center text-xs text-slate-400">ไม่พบ Tool ที่ตรงกับการค้นหา</div>
               )}
             </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="md:col-span-5 flex flex-col overflow-y-auto p-4 gap-3 bg-white">
+          <form onSubmit={handleSubmit} className="md:col-span-5 flex min-h-0 flex-col overflow-y-auto p-4 gap-3 bg-white">
             <div className="flex items-center justify-between border-b pb-2">
               <h3 className="text-sm font-bold text-slate-900">
                 {editingId ? `แก้ไข Tool: ${editingId}` : 'สร้าง Tool ใหม่'}
@@ -350,17 +382,16 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
               </label>
 
               <label className="text-xs font-semibold text-slate-700">
-                Tool ID (Slug) *
+                Tool ID (Slug)
                 <input
                   type="text"
-                  required
                   disabled={Boolean(editingId)}
                   value={form.id}
                   onChange={(e) => {
                     setIdTouched(true)
                     setForm((prev) => ({ ...prev, id: e.target.value }))
                   }}
-                  placeholder="crowdstrike_edr"
+                  placeholder="อัตโนมัติ หรือ crowdstrike_edr"
                   className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono text-xs font-normal disabled:bg-slate-100"
                 />
               </label>
@@ -428,9 +459,9 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
               </label>
             </div>
 
-            <label className="text-xs font-semibold text-slate-700">
+            <div className="text-xs font-semibold text-slate-700">
               <div className="flex items-center justify-between">
-                <span>Mock Sandbox Output (JSON, ไม่บังคับ)</span>
+                <label htmlFor="tool-mock-output">Mock Sandbox Output (JSON, ไม่บังคับ)</label>
                 <button
                   type="button"
                   onClick={() =>
@@ -451,13 +482,14 @@ export function ToolManagerModal({ open, tools, onClose, onChanged }: ToolManage
                 </button>
               </div>
               <textarea
+                id="tool-mock-output"
                 rows={4}
                 value={form.mockOutputText}
                 onChange={(e) => setForm((prev) => ({ ...prev, mockOutputText: e.target.value }))}
                 placeholder='{"is_malicious": true, "verdict": "Suspicious"}'
                 className="mt-1 w-full rounded border border-slate-300 p-2 font-mono text-[11px] font-normal"
               />
-            </label>
+            </div>
 
             <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
               <input
