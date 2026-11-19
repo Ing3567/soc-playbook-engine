@@ -30,6 +30,22 @@ func (r *ToolRepository) EnsureBuiltinTools(ctx context.Context) error {
 		if _, err := r.collection.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
 			return err
 		}
+		// Backfill URL parameter metadata on pre-existing built-in docs that predate params support.
+		backfillFilter := bson.M{
+			"_id":    tool.ID,
+			"params": bson.M{"$exists": false},
+		}
+		backfillUpdate := bson.M{
+			"$set": bson.M{
+				"http_method":  tool.HTTPMethod,
+				"payload_mode": tool.PayloadMode,
+				"endpoint":     tool.Endpoint,
+				"params":       tool.Params,
+			},
+		}
+		if _, err := r.collection.UpdateOne(ctx, backfillFilter, backfillUpdate); err != nil {
+			return err
+		}
 	}
 	return nil
 }

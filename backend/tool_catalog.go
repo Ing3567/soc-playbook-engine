@@ -22,6 +22,9 @@ var (
 	reservedToolIDs     = map[string]bool{"none": true, "manual_lookup": true, "manual_action": true}
 	validToolCategories = map[string]bool{"lookup": true, "action": true}
 	validCommandTypes   = map[string]bool{"http-api": true, "manual": true, "bash": true, "ssh": true}
+	validHTTPMethods    = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELETE": true}
+	validPayloadModes   = map[string]bool{"fixed": true, "dynamic": true}
+	validParamLocations = map[string]bool{"path": true, "query": true, "body": true, "header": true}
 )
 
 func DefaultBuiltinTools() []ToolDefinition {
@@ -33,9 +36,14 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Description: "Check IP, domain, URL, or file hash reputation and malicious detections on VirusTotal",
 			Keywords:    []string{"virustotal", "vt"},
 			CommandType: "http-api",
-			Endpoint:    "https://www.virustotal.com/api/v3",
-			IsBuiltin:   true,
-			Enabled:     true,
+			HTTPMethod:  "GET",
+			Endpoint:    "https://www.virustotal.com/api/v3/ip_addresses/{{ip}}",
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "ip", Label: "Target IP", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			},
+			IsBuiltin: true,
+			Enabled:   true,
 		},
 		{
 			ID:          "abuseipdb",
@@ -44,9 +52,15 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Description: "Query IP address abuse confidence score and threat reports on AbuseIPDB",
 			Keywords:    []string{"abuseipdb"},
 			CommandType: "http-api",
+			HTTPMethod:  "GET",
 			Endpoint:    "https://api.abuseipdb.com/api/v2/check",
-			IsBuiltin:   true,
-			Enabled:     true,
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "ipAddress", Label: "IP Address", In: "query", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+				{Key: "maxAgeInDays", Label: "Max Age (Days)", In: "query", Mode: "fixed", Value: "90", DefaultValue: "90"},
+			},
+			IsBuiltin: true,
+			Enabled:   true,
 		},
 		{
 			ID:          "jira_search",
@@ -55,9 +69,15 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Description: "Search historical incidents, past cases, or existing tickets in Jira",
 			Keywords:    []string{"jira", "เคสเก่า"},
 			CommandType: "http-api",
+			HTTPMethod:  "GET",
 			Endpoint:    "/rest/api/3/search",
-			IsBuiltin:   true,
-			Enabled:     true,
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "jql", Label: "JQL Filter", In: "query", Mode: "dynamic", Value: `text ~ "{{alert.src_ip}}"`, Required: true},
+				{Key: "maxResults", Label: "Max Results", In: "query", Mode: "fixed", Value: "10", DefaultValue: "10"},
+			},
+			IsBuiltin: true,
+			Enabled:   true,
 		},
 		{
 			ID:          "firewall_block",
@@ -66,9 +86,15 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Description: "Block malicious IP address, domain, or suspend network access on the Firewall",
 			Keywords:    []string{"บล็อก", "ระงับ", "block", "firewall"},
 			CommandType: "http-api",
+			HTTPMethod:  "POST",
 			Endpoint:    "/api/firewall/block",
-			IsBuiltin:   true,
-			Enabled:     true,
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "ip", Label: "Block IP", In: "body", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+				{Key: "action", Label: "Action", In: "body", Mode: "fixed", Value: "deny"},
+			},
+			IsBuiltin: true,
+			Enabled:   true,
 		},
 		{
 			ID:          "jira_ticket",
@@ -77,9 +103,15 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Description: "Open or update an incident ticket, escalate to Tier 2, or record results in ticketing system",
 			Keywords:    []string{"ticket", "tier", "เปิดเคส", "เคส"},
 			CommandType: "http-api",
+			HTTPMethod:  "POST",
 			Endpoint:    "/rest/api/3/issue",
-			IsBuiltin:   true,
-			Enabled:     true,
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "summary", Label: "Ticket Summary", In: "body", Mode: "dynamic", Value: "SOC Alert for {{alert.src_ip}}", Required: true},
+				{Key: "priority", Label: "Priority", In: "body", Mode: "fixed", Value: "High"},
+			},
+			IsBuiltin: true,
+			Enabled:   true,
 		},
 	}
 }
@@ -126,6 +158,26 @@ func NormalizeAndValidateTool(tool ToolDefinition, isCreate bool) (ToolDefinitio
 		return tool, fmt.Errorf("%w: command_type must be http-api, manual, bash, or ssh", ErrInvalidTool)
 	}
 
+	tool.HTTPMethod = strings.ToUpper(strings.TrimSpace(tool.HTTPMethod))
+	if tool.HTTPMethod == "" {
+		if tool.Category == "lookup" {
+			tool.HTTPMethod = "GET"
+		} else {
+			tool.HTTPMethod = "POST"
+		}
+	}
+	if !validHTTPMethods[tool.HTTPMethod] {
+		return tool, fmt.Errorf("%w: http_method must be GET, POST, PUT, or DELETE", ErrInvalidTool)
+	}
+
+	tool.PayloadMode = strings.ToLower(strings.TrimSpace(tool.PayloadMode))
+	if tool.PayloadMode == "" {
+		tool.PayloadMode = "dynamic"
+	}
+	if !validPayloadModes[tool.PayloadMode] {
+		return tool, fmt.Errorf("%w: payload_mode must be fixed or dynamic", ErrInvalidTool)
+	}
+
 	tool.Description = strings.TrimSpace(tool.Description)
 	if tool.Description == "" {
 		return tool, fmt.Errorf("%w: description is required", ErrInvalidTool)
@@ -143,5 +195,38 @@ func NormalizeAndValidateTool(tool ToolDefinition, isCreate bool) (ToolDefinitio
 	}
 	tool.Keywords = cleanedKeywords
 	tool.Endpoint = strings.TrimSpace(tool.Endpoint)
+
+	cleanedParams := make([]ToolParameter, 0, len(tool.Params))
+	seenParams := make(map[string]bool)
+	for _, p := range tool.Params {
+		p.Key = strings.TrimSpace(p.Key)
+		if p.Key == "" {
+			return tool, fmt.Errorf("%w: parameter key is required", ErrInvalidTool)
+		}
+		p.In = strings.ToLower(strings.TrimSpace(p.In))
+		if p.In == "" {
+			p.In = "query"
+		}
+		if !validParamLocations[p.In] {
+			return tool, fmt.Errorf("%w: parameter 'in' must be path, query, body, or header", ErrInvalidTool)
+		}
+		p.Mode = strings.ToLower(strings.TrimSpace(p.Mode))
+		if p.Mode == "" {
+			p.Mode = tool.PayloadMode
+		}
+		if !validPayloadModes[p.Mode] {
+			return tool, fmt.Errorf("%w: parameter 'mode' must be fixed or dynamic", ErrInvalidTool)
+		}
+		p.Label = strings.TrimSpace(p.Label)
+		p.Value = strings.TrimSpace(p.Value)
+		p.DefaultValue = strings.TrimSpace(p.DefaultValue)
+		dedupKey := p.In + ":" + p.Key
+		if !seenParams[dedupKey] {
+			seenParams[dedupKey] = true
+			cleanedParams = append(cleanedParams, p)
+		}
+	}
+	tool.Params = cleanedParams
+
 	return tool, nil
 }
