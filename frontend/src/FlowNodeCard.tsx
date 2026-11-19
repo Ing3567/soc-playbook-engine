@@ -15,6 +15,7 @@ export function FlowNodeCard({ data }: NodeProps) {
   const onRun = data.onRun as (() => void) | undefined
   const onChangeTool = data.onChangeTool as ((nextTool: string) => void) | undefined
   const onEditPayload = data.onEditPayload as (() => void) | undefined
+  const onCreateTool = data.onCreateTool as ((category: 'lookup' | 'action') => void) | undefined
 
   let boxStyle = 'bg-slate-100 border-slate-400 text-slate-800 rounded-xl'
   let badge = 'ACTION'
@@ -66,7 +67,7 @@ export function FlowNodeCard({ data }: NodeProps) {
     missing: boolean
   }> = []
 
-  if (nodeType === 'lookup') {
+  if (canRun) {
     const seen = new Set<string>()
     for (const p of matchedTool?.params || []) {
       seen.add(p.key)
@@ -110,13 +111,20 @@ export function FlowNodeCard({ data }: NodeProps) {
 
       <div className="mt-1 text-xs font-semibold leading-snug">{label}</div>
 
-      {nodeType === 'lookup' && payloadTags.length > 0 && (
+      {canRun && payloadTags.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">
           {payloadTags.map((tag) => (
-            <span
+            <button
               key={`${tag.location}-${tag.key}`}
-              title={`${tag.location} (${tag.mode}): ${tag.key}=${tag.value || '(empty)'}`}
-              className={`inline-flex items-center gap-1 max-w-full rounded px-1.5 py-0.5 text-[9px] font-mono border ${
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onEditPayload?.()
+              }}
+              title={`คลิกเพื่อแก้ไข ${tag.location} (${tag.mode}): ${tag.key}=${tag.value || '(empty)'}`}
+              className={`nodrag nopan cursor-pointer inline-flex items-center gap-1 max-w-full rounded px-1.5 py-0.5 text-[9px] font-mono border hover:brightness-95 ${
                 tag.missing
                   ? 'bg-rose-50 border-rose-400 text-rose-800'
                   : tag.mode === 'fixed'
@@ -135,7 +143,7 @@ export function FlowNodeCard({ data }: NodeProps) {
               >
                 {tag.mode === 'fixed' ? 'FIX' : 'DYN'}
               </span>
-            </span>
+            </button>
           ))}
         </div>
       )}
@@ -150,7 +158,12 @@ export function FlowNodeCard({ data }: NodeProps) {
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 e.stopPropagation()
-                onChangeTool(e.target.value)
+                const val = e.target.value
+                if (val === '__create_new__') {
+                  onCreateTool?.(nodeType === 'lookup' ? 'lookup' : 'action')
+                  return
+                }
+                onChangeTool(val)
               }}
               aria-label="Select tool"
               className="nodrag nopan max-w-[118px] truncate rounded border border-slate-300 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-800 cursor-pointer"
@@ -166,13 +179,14 @@ export function FlowNodeCard({ data }: NodeProps) {
               <option value={manualOptionId}>
                 {nodeType === 'lookup' ? 'Manual Lookup' : 'Manual Action'}
               </option>
+              {onCreateTool && <option value="__create_new__">+ สร้าง Tool ใหม่...</option>}
             </select>
           ) : (
             <span />
           )}
 
           <div className="flex items-center gap-1 shrink-0">
-            {nodeType === 'lookup' && onEditPayload && (
+            {(nodeType === 'lookup' || payloadTags.length > 0) && onEditPayload && (
               <button
                 type="button"
                 onPointerDown={(e) => e.stopPropagation()}

@@ -7,6 +7,7 @@ interface LookupPayloadModalProps {
   runtimeContext: Record<string, unknown>
   onClose: () => void
   onSave: (nodeId: string, payloadMode: PayloadMode, inputPayload: Record<string, string>) => void
+  onEditTool?: (toolId: string) => void
 }
 
 const DYNAMIC_VAR_CHIPS = [
@@ -38,6 +39,7 @@ export function LookupPayloadModal({
   runtimeContext,
   onClose,
   onSave,
+  onEditTool,
 }: LookupPayloadModalProps) {
   const [mode, setMode] = useState<PayloadMode>('dynamic')
   const [values, setValues] = useState<Record<string, string>>({})
@@ -129,19 +131,33 @@ export function LookupPayloadModal({
     >
       <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900">
-              Lookup Input Payload: {tool?.name || node.tool}
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-slate-900 truncate">
+              {node.type === 'action' ? 'Action' : 'Lookup'} Input Payload: {tool?.name || node.tool}
             </h3>
-            <p className="text-[11px] text-slate-500">{node.label}</p>
+            <p className="text-[11px] text-slate-500 truncate">{node.label}</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-200"
-          >
-            ✕ ปิด
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {onEditTool && tool && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose()
+                  onEditTool(tool.id)
+                }}
+                className="rounded border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                ✎ แก้ไข Tool นี้
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-200"
+            >
+              ✕ ปิด
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
