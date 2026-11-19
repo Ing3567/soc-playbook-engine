@@ -69,7 +69,15 @@ func formatToolCatalogForPrompt(tools []ToolDefinition) string {
 		if len(t.Keywords) > 0 {
 			kw = fmt.Sprintf(" (keywords: %s)", strings.Join(t.Keywords, ", "))
 		}
-		entry := fmt.Sprintf("- %s (%s): %s%s", t.ID, t.Name, t.Description, kw)
+		paramHint := ""
+		if len(t.Params) > 0 {
+			pNames := make([]string, 0, len(t.Params))
+			for _, p := range t.Params {
+				pNames = append(pNames, fmt.Sprintf("%s[%s]", p.Key, p.In))
+			}
+			paramHint = fmt.Sprintf(" [params: %s]", strings.Join(pNames, ", "))
+		}
+		entry := fmt.Sprintf("- %s (%s): %s%s%s", t.ID, t.Name, t.Description, kw, paramHint)
 		if t.Category == "lookup" {
 			lookupLines = append(lookupLines, entry)
 		} else {

@@ -111,15 +111,42 @@ func ResolveStepTool(step Step, tools []ToolDefinition) (string, string) {
 	return kwMatch, "manual"
 }
 
+func (g *graphState) findToolByID(toolID string) *ToolDefinition {
+	for i := range g.tools {
+		if g.tools[i].ID == toolID {
+			return &g.tools[i]
+		}
+	}
+	return nil
+}
+
 func (g *graphState) appendNode(nodeType, label, tool, toolSource string) string {
 	id := fmt.Sprintf("n%d", len(g.nodes)+1)
-	g.nodes = append(g.nodes, Node{
+	node := Node{
 		ID:         id,
 		Type:       nodeType,
 		Label:      label,
 		Tool:       tool,
 		ToolSource: toolSource,
-	})
+	}
+	if toolDef := g.findToolByID(tool); toolDef != nil && (nodeType == "lookup" || len(toolDef.Params) > 0) {
+		if toolDef.PayloadMode != "" {
+			node.PayloadMode = toolDef.PayloadMode
+		} else if len(toolDef.Params) > 0 {
+			node.PayloadMode = "dynamic"
+		}
+		if len(toolDef.Params) > 0 {
+			node.InputPayload = make(map[string]string, len(toolDef.Params))
+			for _, p := range toolDef.Params {
+				if p.Value != "" {
+					node.InputPayload[p.Key] = p.Value
+				} else if p.DefaultValue != "" {
+					node.InputPayload[p.Key] = p.DefaultValue
+				}
+			}
+		}
+	}
+	g.nodes = append(g.nodes, node)
 	return id
 }
 

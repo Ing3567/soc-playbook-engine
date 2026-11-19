@@ -150,7 +150,19 @@ func BuildCacaoJSON(title string, nodes []Node, edges []Edge, toolMaps ...map[st
 		} else {
 			cmdText := n.Label
 			if def, ok := toolMap[n.Tool]; ok && def.Endpoint != "" {
-				cmdText = fmt.Sprintf("[%s] %s (%s)", def.Name, n.Label, def.Endpoint)
+				resolved := BuildToolRequest(&def, ExecutionRequest{
+					NodeID:       n.ID,
+					Type:         n.Type,
+					Label:        n.Label,
+					Tool:         n.Tool,
+					PayloadMode:  n.PayloadMode,
+					InputPayload: n.InputPayload,
+				})
+				targetURL := def.Endpoint
+				if n.PayloadMode == "fixed" && resolved.URL != "" {
+					targetURL = resolved.URL
+				}
+				cmdText = fmt.Sprintf("[%s] %s %s (%s)", def.Name, resolved.Method, targetURL, n.Label)
 			}
 			item = CacaoStepItem{
 				Type:     "action",
