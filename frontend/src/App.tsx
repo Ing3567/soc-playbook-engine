@@ -12,9 +12,10 @@ import {
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
-import type { FlowNode, FlowEdge, PlaybookItem, RunStatus, ExecutionLog } from './types'
-import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile } from './api'
+import type { FlowNode, FlowEdge, PlaybookItem, RunStatus, ExecutionLog, ToolDefinition } from './types'
+import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
 import { FlowNodeCard } from './FlowNodeCard'
+import { ToolManagerModal } from './ToolManagerModal'
 
 const nodeTypes = { socNode: FlowNodeCard }
 
@@ -32,13 +33,15 @@ function buildGraphLayout(
   nodes: FlowNode[],
   edges: FlowEdge[],
   statuses: Record<string, RunStatus>,
-  onRunNode: (id: string) => void
+  availableTools: ToolDefinition[],
+  onRunNode: (id: string) => void,
+  onChangeTool: (id: string, nextTool: string) => void
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'TB', nodesep: 55, ranksep: 70 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: 230, height: 86 }))
+  nodes.forEach((n) => g.setNode(n.id, { width: 240, height: 94 }))
   edges.forEach((e) => g.setEdge(e.source, e.target))
   dagre.layout(g)
 
@@ -47,11 +50,13 @@ function buildGraphLayout(
     return {
       id: n.id,
       type: 'socNode',
-      position: { x: (pos?.x ?? 0) - 115, y: (pos?.y ?? 0) - 43 },
+      position: { x: (pos?.x ?? 0) - 120, y: (pos?.y ?? 0) - 47 },
       data: {
         ...n,
         status: statuses[n.id] || 'idle',
+        availableTools,
         onRun: () => onRunNode(n.id),
+        onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
       },
     }
   })
@@ -77,6 +82,8 @@ export default function App() {
   const [nodes, setNodes] = useState<FlowNode[]>([])
   const [edges, setEdges] = useState<FlowEdge[]>([])
   const [savedList, setSavedList] = useState<PlaybookItem[]>([])
+  const [tools, setTools] = useState<ToolDefinition[]>([])
+  const [toolModalOpen, setToolModalOpen] = useState(false)
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
@@ -87,14 +94,37 @@ export default function App() {
 
   const nodesRef = useRef<FlowNode[]>([])
   nodesRef.current = nodes
+  const toolsRef = useRef<ToolDefinition[]>([])
+  toolsRef.current = tools
+  const skipNextLayoutRef = useRef(false)
 
   const reloadPlaybooks = useCallback(async () => {
     setSavedList(await getPlaybooks())
   }, [])
 
+  const reloadTools = useCallback(async () => {
+    setTools(await getTools())
+  }, [])
+
   useEffect(() => {
     reloadPlaybooks()
-  }, [reloadPlaybooks])
+    reloadTools()
+  }, [reloadPlaybooks, reloadTools])
+
+  const changeNodeTool = useCallback(
+    (nodeId: string, nextTool: string) => {
+      skipNextLayoutRef.current = true
+      setNodes((prev) =>
+        prev.map((n) => (n.id === nodeId ? { ...n, tool: nextTool, tool_source: 'manual' } : n))
+      )
+      setRfNodes((prev) =>
+        prev.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, tool: nextTool, tool_source: 'manual' } } : n
+        )
+      )
+    },
+    [setRfNodes]
+  )
 
   const runNode = useCallback(
     async (nodeId: string): Promise<{ ok: boolean; output: Record<string, unknown> | null }> => {
@@ -137,24 +167,35 @@ export default function App() {
   )
 
   useEffect(() => {
+    if (skipNextLayoutRef.current) {
+      skipNextLayoutRef.current = false
+      return
+    }
     if (nodes.length === 0) {
       setRfNodes([])
       setRfEdges([])
       return
     }
-    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(nodes, edges, {}, runNode)
+    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(
+      nodes,
+      edges,
+      {},
+      toolsRef.current,
+      runNode,
+      changeNodeTool
+    )
     setRfNodes(nextN)
     setRfEdges(nextE)
-  }, [nodes, edges, runNode, setRfNodes, setRfEdges])
+  }, [nodes, edges, runNode, changeNodeTool, setRfNodes, setRfEdges])
 
   useEffect(() => {
     setRfNodes((prev) =>
       prev.map((n) => ({
         ...n,
-        data: { ...n.data, status: statuses[n.id] || 'idle' },
+        data: { ...n.data, status: statuses[n.id] || 'idle', availableTools: tools },
       }))
     )
-  }, [statuses, setRfNodes])
+  }, [statuses, tools, setRfNodes])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
@@ -213,6 +254,10 @@ export default function App() {
       lastOutput != null &&
       ((typeof lastOutput.malicious_count === 'number' && lastOutput.malicious_count > 0) ||
         (typeof lastOutput.confidence_score === 'number' && lastOutput.confidence_score >= 50) ||
+        (typeof lastOutput.risk_score === 'number' && lastOutput.risk_score >= 50) ||
+        lastOutput.is_malicious === true ||
+        lastOutput.alert === true ||
+        lastOutput.matched === true ||
         (Array.isArray(lastOutput.matched_cases) && lastOutput.matched_cases.length > 0))
 
     if (isPositive) {
@@ -327,6 +372,13 @@ export default function App() {
           >
             Run Playbook
           </button>
+          <button
+            type="button"
+            onClick={() => setToolModalOpen(true)}
+            className="col-span-2 rounded border border-slate-300 bg-slate-100 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-200"
+          >
+            จัดการ Tools ({tools.filter((t) => t.enabled).length}/{tools.length})
+          </button>
         </div>
 
         <div className="border-t pt-2">
@@ -440,6 +492,13 @@ export default function App() {
           ))}
         </div>
       </main>
+
+      <ToolManagerModal
+        open={toolModalOpen}
+        tools={tools}
+        onClose={() => setToolModalOpen(false)}
+        onChanged={reloadTools}
+      />
     </div>
   )
 }
