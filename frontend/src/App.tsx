@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, type ChangeEvent } from 'react'
 import {
   ReactFlow,
   Background,
@@ -23,6 +23,7 @@ import type {
   PayloadMode,
 } from './types'
 import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
+import { computePipelineState, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
 import { FlowNodeCard } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
@@ -113,6 +114,7 @@ export default function App() {
     username: 'jdoe',
   })
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
+  const [nodeOutputs, setNodeOutputs] = useState<Record<string, Record<string, unknown>>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -120,13 +122,42 @@ export default function App() {
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([])
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
 
+  const pipelineState = useMemo(
+    () => computePipelineState(nodes, edges, statuses, nodeOutputs),
+    [nodes, edges, statuses, nodeOutputs]
+  )
+
   const nodesRef = useRef<FlowNode[]>([])
   nodesRef.current = nodes
+  const edgesRef = useRef<FlowEdge[]>([])
+  edgesRef.current = edges
   const toolsRef = useRef<ToolDefinition[]>([])
   toolsRef.current = tools
   const alertContextRef = useRef(alertContext)
   alertContextRef.current = alertContext
+  const statusesRef = useRef(statuses)
+  statusesRef.current = statuses
+  const nodeOutputsRef = useRef(nodeOutputs)
+  nodeOutputsRef.current = nodeOutputs
+  const pipelineRef = useRef(pipelineState)
+  pipelineRef.current = pipelineState
   const skipNextLayoutRef = useRef(false)
+
+  const invalidateFromNode = useCallback((nodeId: string, includeSelf: boolean) => {
+    const downstream = getDownstreamNodeIds(nodeId, edgesRef.current)
+    const idsToClear = includeSelf ? [nodeId, ...downstream] : downstream
+    if (idsToClear.length === 0) return
+    setStatuses((prev) => {
+      const next = { ...prev }
+      for (const id of idsToClear) delete next[id]
+      return next
+    })
+    setNodeOutputs((prev) => {
+      const next = { ...prev }
+      for (const id of idsToClear) delete next[id]
+      return next
+    })
+  }, [])
 
   const reloadPlaybooks = useCallback(async () => {
     setSavedList(await getPlaybooks())
@@ -150,6 +181,7 @@ export default function App() {
   const changeNodeTool = useCallback(
     (nodeId: string, nextTool: string) => {
       skipNextLayoutRef.current = true
+      invalidateFromNode(nodeId, true)
       const matched = toolsRef.current.find((t) => t.id === nextTool)
       const nextMode: PayloadMode | undefined = matched?.payload_mode || (matched?.params?.length ? 'dynamic' : undefined)
       const nextPayload: Record<string, string> | undefined = matched?.params?.length
@@ -182,12 +214,13 @@ export default function App() {
         )
       )
     },
-    [setRfNodes]
+    [setRfNodes, invalidateFromNode]
   )
 
   const updateNodePayload = useCallback(
     (nodeId: string, payloadMode: PayloadMode, inputPayload: Record<string, string>) => {
       skipNextLayoutRef.current = true
+      invalidateFromNode(nodeId, true)
       setNodes((prev) =>
         prev.map((n) => (n.id === nodeId ? { ...n, payload_mode: payloadMode, input_payload: inputPayload } : n))
       )
@@ -199,7 +232,7 @@ export default function App() {
         )
       )
     },
-    [setRfNodes]
+    [setRfNodes, invalidateFromNode]
   )
 
   const runNode = useCallback(
@@ -209,15 +242,29 @@ export default function App() {
     ): Promise<{ ok: boolean; output: Record<string, unknown> | null }> => {
       const target = nodesRef.current.find((n) => n.id === nodeId)
       if (!target) return { ok: false, output: null }
+
+      const pState = pipelineRef.current.nodeStates[nodeId]
+      if (!extraContext && pState && (pState.availability === 'locked' || pState.availability === 'skipped')) {
+        return { ok: false, output: null }
+      }
+
+      if (!extraContext && statusesRef.current[nodeId] === 'success') {
+        invalidateFromNode(nodeId, false)
+      }
+
       setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
       const runtimeCtx: Record<string, unknown> = {
         alert: alertContextRef.current,
-        ...extraContext,
+        prev: extraContext?.prev ?? pState?.upstreamOutput ?? {},
+        nodes: extraContext?.nodes ?? nodeOutputsRef.current,
       }
       try {
         const res = await executeStep(target, runtimeCtx)
         const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
         setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
+        if (nextStatus === 'success') {
+          setNodeOutputs((prev) => ({ ...prev, [nodeId]: res.output ?? {} }))
+        }
         setLogs((prev) => [
           {
             node_id: target.id,
@@ -246,7 +293,7 @@ export default function App() {
         return { ok: false, output: null }
       }
     },
-    []
+    [invalidateFromNode]
   )
 
   useEffect(() => {
@@ -279,12 +326,40 @@ export default function App() {
 
   useEffect(() => {
     setRfNodes((prev) =>
-      prev.map((n) => ({
-        ...n,
-        data: { ...n.data, status: statuses[n.id] || 'idle', availableTools: tools },
-      }))
+      prev.map((n) => {
+        const pInfo = pipelineState.nodeStates[n.id]
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            status: statuses[n.id] || 'idle',
+            availableTools: tools,
+            pipelineAvailability: pInfo?.availability ?? 'ready',
+            lockedReason: pInfo?.lockedReason ?? '',
+          },
+        }
+      })
     )
-  }, [statuses, tools, setRfNodes])
+    setRfEdges((prev) =>
+      prev.map((e) => {
+        const isTraversed = pipelineState.traversedEdgeIds.has(e.id)
+        const isSkipped = pipelineState.skippedEdgeIds.has(e.id)
+        const targetState = pipelineState.nodeStates[e.target]
+        const isFrontier = isTraversed && targetState?.availability === 'ready' && statuses[e.target] !== 'success'
+        const color = isSkipped ? '#cbd5e1' : isFrontier ? '#3b82f6' : isTraversed ? '#10b981' : '#94a3b8'
+        return {
+          ...e,
+          animated: isFrontier,
+          style: {
+            stroke: color,
+            strokeWidth: isTraversed ? 2.5 : 1.5,
+            strokeDasharray: isSkipped ? '5 5' : undefined,
+          },
+          markerEnd: { type: MarkerType.ArrowClosed, color },
+        }
+      })
+    )
+  }, [statuses, tools, pipelineState, setRfNodes, setRfEdges])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
@@ -295,6 +370,7 @@ export default function App() {
       setEdges(data.edges || [])
       setEngine(data.engine || '-')
       setStatuses({})
+      setNodeOutputs({})
       if (nextTitle) setTitle(nextTitle)
       return data
     } catch (e) {
@@ -335,29 +411,10 @@ export default function App() {
     }
   }
 
-  function pickDecisionEdge(outEdges: FlowEdge[], lastOutput: Record<string, unknown> | null): FlowEdge | undefined {
-    if (outEdges.length === 0) return undefined
-    if (outEdges.length === 1) return outEdges[0]
-
-    const isPositive =
-      lastOutput != null &&
-      ((typeof lastOutput.malicious_count === 'number' && lastOutput.malicious_count > 0) ||
-        (typeof lastOutput.confidence_score === 'number' && lastOutput.confidence_score >= 50) ||
-        (typeof lastOutput.risk_score === 'number' && lastOutput.risk_score >= 50) ||
-        lastOutput.is_malicious === true ||
-        lastOutput.alert === true ||
-        lastOutput.matched === true ||
-        (Array.isArray(lastOutput.matched_cases) && lastOutput.matched_cases.length > 0))
-
-    if (isPositive) {
-      return outEdges.find((e) => e.label === 'ใช่' || e.label?.toLowerCase() === 'yes') ?? outEdges[0]
-    }
-    return outEdges.find((e) => e.label === 'ไม่ใช่' || e.label?.toLowerCase() === 'no') ?? outEdges[outEdges.length - 1]
-  }
-
   async function handleRunAll() {
     if (nodes.length === 0) return
     setStatuses({})
+    setNodeOutputs({})
 
     const nodeMap = new Map(nodes.map((n) => [n.id, n]))
     const outgoing = new Map<string, FlowEdge[]>()
@@ -372,7 +429,7 @@ export default function App() {
 
     const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
     const visited = new Set<string>()
-    const nodeOutputs: Record<string, unknown> = {}
+    const localOutputs: Record<string, unknown> = {}
     let current: FlowNode | undefined = startNode
     let lastOutput: Record<string, unknown> | null = null
 
@@ -383,12 +440,12 @@ export default function App() {
       if (current.type === 'lookup' || current.type === 'action') {
         const res = await runNode(current.id, {
           prev: lastOutput ?? {},
-          nodes: nodeOutputs,
+          nodes: localOutputs,
         })
         if (!res.ok) break
         lastOutput = res.output
         if (res.output) {
-          nodeOutputs[current.id] = res.output
+          localOutputs[current.id] = res.output
         }
       } else if (current.type === 'end') {
         break
@@ -400,9 +457,14 @@ export default function App() {
     }
   }
 
+  function handleResetExecution() {
+    setStatuses({})
+    setNodeOutputs({})
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-800">
-      <aside className="no-print flex w-80 flex-col border-r border-slate-200 bg-white p-3 gap-3 overflow-y-auto">
+      <aside className="no-print flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white p-3 gap-3 overflow-y-auto">
         <div className="flex items-center justify-between">
           <h1 className="text-base font-bold">SOC Playbook Engine</h1>
           <button
@@ -415,6 +477,7 @@ export default function App() {
               setNodes([])
               setEdges([])
               setStatuses({})
+              setNodeOutputs({})
               setLogs([])
               setError('')
             }}
@@ -457,7 +520,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleSave}
-            className="rounded bg-emerald-600 py-1.5 text-xs font-bold text-white hover:bg-emerald-700"
+            className="col-span-2 rounded bg-emerald-600 py-1.5 text-xs font-bold text-white hover:bg-emerald-700"
           >
             Save (MongoDB)
           </button>
@@ -466,7 +529,14 @@ export default function App() {
             onClick={handleRunAll}
             className="rounded bg-indigo-600 py-1.5 text-xs font-bold text-white hover:bg-indigo-700"
           >
-            Run Playbook
+            ▶ Run Playbook
+          </button>
+          <button
+            type="button"
+            onClick={handleResetExecution}
+            className="rounded border border-slate-300 bg-white py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100"
+          >
+            ↺ Reset Run
           </button>
           <button
             type="button"
@@ -592,6 +662,7 @@ export default function App() {
                     setNodes(item.nodes || [])
                     setEdges(item.edges || [])
                     setStatuses({})
+                    setNodeOutputs({})
                   }}
                   className="truncate text-left flex-1 font-medium hover:text-blue-600"
                 >
@@ -618,8 +689,8 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex flex-1 flex-col">
-        <div className="flex-1 print-canvas">
+      <main className="flex flex-1 min-w-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 print-canvas">
           <ReactFlow
             nodes={rfNodes}
             edges={rfEdges}
@@ -633,7 +704,7 @@ export default function App() {
           </ReactFlow>
         </div>
 
-        <div className="no-print h-40 border-t border-slate-200 bg-slate-900 text-slate-100 p-2.5 overflow-y-auto font-mono text-xs">
+        <div className="no-print h-40 shrink-0 border-t border-slate-200 bg-slate-900 text-slate-100 p-2.5 overflow-y-auto font-mono text-xs">
           <div className="flex items-center justify-between mb-1">
             <span className="font-bold text-emerald-400">Execution Logs</span>
             <button type="button" onClick={() => setLogs([])} className="text-slate-400 text-[11px]">
@@ -645,7 +716,9 @@ export default function App() {
               <div className="text-sky-300 font-semibold">
                 [{log.timestamp}] {log.label} ({log.duration_ms} ms)
               </div>
-              <pre className="text-[11px] text-slate-300">{JSON.stringify(log.output)}</pre>
+              <pre className="text-[11px] text-slate-300 whitespace-pre-wrap break-all">
+                {JSON.stringify(log.output, null, 2)}
+              </pre>
             </div>
           ))}
         </div>
@@ -669,7 +742,13 @@ export default function App() {
       <LookupPayloadModal
         node={nodes.find((n) => n.id === editingPayloadNodeId) ?? null}
         tool={tools.find((t) => t.id === nodes.find((n) => n.id === editingPayloadNodeId)?.tool)}
-        runtimeContext={{ alert: alertContext }}
+        runtimeContext={{
+          alert: alertContext,
+          prev: editingPayloadNodeId
+            ? (pipelineState.nodeStates[editingPayloadNodeId]?.upstreamOutput ?? {})
+            : {},
+          nodes: nodeOutputs,
+        }}
         onClose={() => setEditingPayloadNodeId(null)}
         onSave={updateNodePayload}
         onEditTool={(toolId) => {
