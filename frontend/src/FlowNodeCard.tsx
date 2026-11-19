@@ -1,5 +1,6 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { PayloadMode, RunStatus, ToolDefinition, ToolSource } from './types'
+import type { PipelineNodeAvailability } from './pipeline'
 
 export function FlowNodeCard({ data }: NodeProps) {
   const nodeType = String(data.type || 'action')
@@ -9,6 +10,8 @@ export function FlowNodeCard({ data }: NodeProps) {
   const payloadMode = data.payload_mode as PayloadMode | undefined
   const inputPayload = (data.input_payload as Record<string, string> | undefined) || {}
   const status = (data.status as RunStatus) || 'idle'
+  const pipelineAvailability = (data.pipelineAvailability as PipelineNodeAvailability | undefined) || 'ready'
+  const lockedReason = (data.lockedReason as string | undefined) || ''
   const availableTools = Array.isArray(data.availableTools)
     ? (data.availableTools as ToolDefinition[])
     : []
@@ -94,11 +97,25 @@ export function FlowNodeCard({ data }: NodeProps) {
     }
   }
 
+  const isSkipped = pipelineAvailability === 'skipped'
+  const isLocked = pipelineAvailability === 'locked'
+
   return (
-    <div className={`w-[256px] border-2 px-3 py-2 shadow-sm ${boxStyle} ${ringStyle}`}>
+    <div
+      className={`w-[256px] border-2 px-3 py-2 shadow-sm transition-opacity ${boxStyle} ${ringStyle} ${
+        isSkipped ? 'opacity-50' : ''
+      }`}
+    >
       <Handle type="target" position={Position.Top} className="!bg-slate-500" />
       <div className="flex items-center justify-between gap-1 text-[10px] font-bold opacity-85">
-        <span>{badge}</span>
+        <div className="flex items-center gap-1">
+          <span>{badge}</span>
+          {isSkipped && (
+            <span className="rounded bg-slate-500 px-1 py-0.5 text-[8px] leading-none font-bold text-white">
+              SKIPPED
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1 min-w-0">
           {tool !== 'none' && <span className="truncate uppercase">{toolDisplay}</span>}
           {sourceLabel && (
@@ -166,7 +183,7 @@ export function FlowNodeCard({ data }: NodeProps) {
                 onChangeTool(val)
               }}
               aria-label="Select tool"
-              className="nodrag nopan max-w-[118px] truncate rounded border border-slate-300 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-800 cursor-pointer"
+              className="nodrag nopan max-w-[112px] truncate rounded border border-slate-300 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-800 cursor-pointer"
             >
               {selectableTools.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -203,15 +220,37 @@ export function FlowNodeCard({ data }: NodeProps) {
             )}
             <button
               type="button"
+              disabled={isLocked || isSkipped || status === 'running'}
+              title={isLocked || isSkipped ? lockedReason : undefined}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation()
-                onRun?.()
+                if (!isLocked && !isSkipped && status !== 'running') {
+                  onRun?.()
+                }
               }}
-              className="nodrag nopan shrink-0 rounded bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-blue-700"
+              className={`nodrag nopan shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${
+                isLocked || isSkipped
+                  ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                  : status === 'failed'
+                    ? 'bg-rose-600 text-white hover:bg-rose-700'
+                    : status === 'success'
+                      ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
             >
-              {status === 'running' ? 'Running...' : '▶ Run'}
+              {isSkipped
+                ? '🔒 ข้ามกิ่ง'
+                : isLocked
+                  ? '🔒 รอโหนดบน'
+                  : status === 'running'
+                    ? 'Running...'
+                    : status === 'success'
+                      ? '↻ Re-run'
+                      : status === 'failed'
+                        ? '↻ Retry'
+                        : '▶ Run'}
             </button>
           </div>
         </div>
