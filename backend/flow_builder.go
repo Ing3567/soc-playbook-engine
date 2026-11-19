@@ -6,15 +6,12 @@ import (
 	"strings"
 )
 
-var (
-	vtWordRegex    = regexp.MustCompile(`\b(virustotal|vt)\b`)
-	blockWordRegex = regexp.MustCompile(`\b(block|firewall)\b`)
-	ticketWordRegex = regexp.MustCompile(`\b(ticket|tier)\b`)
-)
+var asciiIdentRegex = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 type graphState struct {
 	nodes []Node
 	edges []Edge
+	tools []ToolDefinition
 }
 
 var supportedNodeTypes = map[string]bool{
@@ -24,41 +21,104 @@ var supportedNodeTypes = map[string]bool{
 	"end":      true,
 }
 
-func MatchToolByKeywords(nodeType, label string) string {
-	lower := strings.ToLower(label)
-	switch nodeType {
-	case "lookup":
-		if vtWordRegex.MatchString(lower) {
-			return "virustotal"
-		}
-		if strings.Contains(lower, "abuseipdb") {
-			return "abuseipdb"
-		}
-		if strings.Contains(lower, "jira") || strings.Contains(lower, "เคสเก่า") {
-			return "jira_search"
-		}
-		return "manual_lookup"
-	case "action":
-		if strings.Contains(lower, "บล็อก") || strings.Contains(lower, "ระงับ") || blockWordRegex.MatchString(lower) {
-			return "firewall_block"
-		}
-		isCloseCase := strings.Contains(lower, "ปิดเคส") && !strings.Contains(lower, "เปิดเคส")
-		if ticketWordRegex.MatchString(lower) || strings.Contains(lower, "เปิดเคส") || (strings.Contains(lower, "เคส") && !isCloseCase) {
-			return "jira_ticket"
-		}
-		return "manual_action"
-	default:
-		return "none"
+func matchesToolKeyword(lowerText, keyword string) bool {
+	kw := strings.ToLower(strings.TrimSpace(keyword))
+	if kw == "" {
+		return false
 	}
+	if asciiIdentRegex.MatchString(kw) {
+		rx, err := regexp.Compile(`\b` + regexp.QuoteMeta(kw) + `\b`)
+		if err == nil {
+			return rx.MatchString(lowerText)
+		}
+	}
+	return strings.Contains(lowerText, kw)
 }
 
-func (g *graphState) appendNode(nodeType, label string) string {
+func MatchToolByCatalog(nodeType, label string, tools []ToolDefinition) string {
+	if nodeType != "lookup" && nodeType != "action" {
+		return "none"
+	}
+	lower := strings.ToLower(label)
+	isCloseCase := strings.Contains(lower, "ปิดเคส") && !strings.Contains(lower, "เปิดเคส")
+
+	bestID := ""
+	bestScore := 0
+	for _, t := range tools {
+		if !t.Enabled || t.Category != nodeType {
+			continue
+		}
+		score := 0
+		for _, kw := range t.Keywords {
+			if t.ID == "jira_ticket" && strings.TrimSpace(kw) == "เคส" && isCloseCase {
+				continue
+			}
+			if matchesToolKeyword(lower, kw) {
+				score += len(strings.TrimSpace(kw)) + 1
+			}
+		}
+		if t.Name != "" && matchesToolKeyword(lower, t.Name) {
+			score += len(t.Name) + 2
+		}
+		if score > bestScore {
+			bestScore = score
+			bestID = t.ID
+		}
+	}
+
+	if bestID != "" {
+		return bestID
+	}
+	if nodeType == "lookup" {
+		return "manual_lookup"
+	}
+	return "manual_action"
+}
+
+func MatchToolByKeywords(nodeType, label string) string {
+	return MatchToolByCatalog(nodeType, label, DefaultBuiltinTools())
+}
+
+func ResolveStepTool(step Step, tools []ToolDefinition) (string, string) {
+	if step.Type != "lookup" && step.Type != "action" {
+		return "none", ""
+	}
+
+	rawTool := strings.TrimSpace(step.Tool)
+	if rawTool != "" {
+		norm := strings.ToLower(rawTool)
+		for _, t := range tools {
+			if !t.Enabled {
+				continue
+			}
+			if strings.ToLower(t.ID) == norm || (t.Name != "" && strings.ToLower(t.Name) == norm) {
+				return t.ID, "ai"
+			}
+		}
+		if norm == "manual_lookup" || norm == "manual_action" {
+			kwMatch := MatchToolByCatalog(step.Type, step.Label, tools)
+			if kwMatch != "manual_lookup" && kwMatch != "manual_action" {
+				return kwMatch, "keyword"
+			}
+			return norm, "ai"
+		}
+	}
+
+	kwMatch := MatchToolByCatalog(step.Type, step.Label, tools)
+	if kwMatch != "manual_lookup" && kwMatch != "manual_action" {
+		return kwMatch, "keyword"
+	}
+	return kwMatch, "manual"
+}
+
+func (g *graphState) appendNode(nodeType, label, tool, toolSource string) string {
 	id := fmt.Sprintf("n%d", len(g.nodes)+1)
 	g.nodes = append(g.nodes, Node{
-		ID:    id,
-		Type:  nodeType,
-		Label: label,
-		Tool:  MatchToolByKeywords(nodeType, label),
+		ID:         id,
+		Type:       nodeType,
+		Label:      label,
+		Tool:       tool,
+		ToolSource: toolSource,
 	})
 	return id
 }
@@ -95,7 +155,7 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 		if nextID != "" {
 			return nextID
 		}
-		return g.appendNode("terminal", "จบ")
+		return g.appendNode("terminal", "จบ", "none", "")
 	}
 	entryID := nextID
 	for i := len(steps) - 1; i >= 0; i-- {
@@ -106,7 +166,8 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 		if step.Type == "decision" && len(step.Branches) == 0 {
 			step.Type = "action"
 		}
-		id := g.appendNode(step.Type, step.Label)
+		tool, source := ResolveStepTool(step, g.tools)
+		id := g.appendNode(step.Type, step.Label, tool, source)
 		switch step.Type {
 		case "decision":
 			for _, br := range step.Branches {
@@ -121,10 +182,10 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 	return entryID
 }
 
-func BuildCustomFlowchart(steps []Step) ([]Node, []Edge) {
-	state := &graphState{}
-	startID := state.appendNode("terminal", "เริ่ม")
-	endID := state.appendNode("terminal", "จบ")
+func BuildCustomFlowchart(steps []Step, tools []ToolDefinition) ([]Node, []Edge) {
+	state := &graphState{tools: tools}
+	startID := state.appendNode("terminal", "เริ่ม", "none", "")
+	endID := state.appendNode("terminal", "จบ", "none", "")
 	state.connectNodes(startID, state.buildStepSequence(steps, endID), "")
 
 	endHasIncoming := false
