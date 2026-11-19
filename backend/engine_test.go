@@ -198,4 +198,121 @@ func TestToolValidationAndSlug(t *testing.T) {
 	if _, err := NormalizeAndValidateTool(ToolDefinition{ID: "none", Name: "Bad", Category: "lookup", Description: "desc"}, true); err == nil {
 		t.Fatalf("expected reserved ID 'none' to fail validation")
 	}
+	valid, err := NormalizeAndValidateTool(ToolDefinition{
+		Name:        "SIEM Query",
+		Category:    "lookup",
+		Description: "Query SIEM logs",
+		HTTPMethod:  "get",
+		PayloadMode: "dynamic",
+		Params: []ToolParameter{
+			{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			{Key: "limit", In: "query", Mode: "fixed", Value: "50"},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if valid.HTTPMethod != "GET" || len(valid.Params) != 2 {
+		t.Fatalf("unexpected normalized tool: %+v", valid)
+	}
+}
+
+func TestBuildToolRequestPathQueryFixedAndDynamic(t *testing.T) {
+	tool := &ToolDefinition{
+		ID:          "threat_lookup",
+		Name:        "Threat Lookup",
+		Category:    "lookup",
+		HTTPMethod:  "GET",
+		Endpoint:    "https://intel.example.com/api/v1/ip/{{ip}}?source=soc",
+		PayloadMode: "dynamic",
+		Params: []ToolParameter{
+			{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			{Key: "days", In: "query", Mode: "fixed", Value: "30"},
+		},
+	}
+
+	dynRes := BuildToolRequest(tool, ExecutionRequest{
+		Tool:        "threat_lookup",
+		PayloadMode: "dynamic",
+		RuntimeContext: map[string]any{
+			"alert": map[string]any{"src_ip": "192.0.2.55"},
+		},
+	})
+	if len(dynRes.MissingRequired) != 0 {
+		t.Fatalf("unexpected missing required: %v", dynRes.MissingRequired)
+	}
+	if !strings.Contains(dynRes.URL, "/api/v1/ip/192.0.2.55?") || !strings.Contains(dynRes.URL, "days=30") || !strings.Contains(dynRes.URL, "source=soc") {
+		t.Fatalf("unexpected dynamic resolved URL: %q", dynRes.URL)
+	}
+
+	fixedRes := BuildToolRequest(tool, ExecutionRequest{
+		Tool:        "threat_lookup",
+		PayloadMode: "fixed",
+		InputPayload: map[string]string{
+			"ip":   "203.0.113.10",
+			"days": "7",
+		},
+	})
+	if !strings.Contains(fixedRes.URL, "/api/v1/ip/203.0.113.10?") || !strings.Contains(fixedRes.URL, "days=7") {
+		t.Fatalf("unexpected fixed resolved URL: %q", fixedRes.URL)
+	}
+
+	missingRes := BuildToolRequest(tool, ExecutionRequest{
+		Tool:           "threat_lookup",
+		PayloadMode:    "dynamic",
+		RuntimeContext: map[string]any{},
+	})
+	if len(missingRes.MissingRequired) != 1 || missingRes.MissingRequired[0] != "ip" {
+		t.Fatalf("expected missing required ['ip'], got %v", missingRes.MissingRequired)
+	}
+}
+
+func TestLookupNodeInheritsInputPayloadAndSandboxResolvesURL(t *testing.T) {
+	tools := DefaultBuiltinTools()
+	steps := []Step{{Type: "lookup", Label: "ตรวจสอบ IP ผ่าน VirusTotal", Tool: "virustotal"}}
+	nodes, _ := BuildCustomFlowchart(steps, tools)
+	var lookupNode *Node
+	for i := range nodes {
+		if nodes[i].Type == "lookup" {
+			lookupNode = &nodes[i]
+			break
+		}
+	}
+	if lookupNode == nil {
+		t.Fatalf("expected lookup node")
+	}
+	if lookupNode.PayloadMode != "dynamic" || lookupNode.InputPayload["ip"] != "{{alert.src_ip}}" {
+		t.Fatalf("expected lookup node to inherit tool input payload, got mode=%q payload=%v", lookupNode.PayloadMode, lookupNode.InputPayload)
+	}
+
+	vt := tools[0]
+	res := RunSandboxStep(ExecutionRequest{
+		NodeID:       lookupNode.ID,
+		Type:         lookupNode.Type,
+		Label:        lookupNode.Label,
+		Tool:         lookupNode.Tool,
+		PayloadMode:  lookupNode.PayloadMode,
+		InputPayload: lookupNode.InputPayload,
+		RuntimeContext: map[string]any{
+			"alert": map[string]any{"src_ip": "198.51.100.42"},
+		},
+	}, &vt)
+	if res.Status != "success" {
+		t.Fatalf("expected success, got %q (%v)", res.Status, res.Output)
+	}
+	if res.Output["resolved_url"] != "https://www.virustotal.com/api/v3/ip_addresses/198.51.100.42" {
+		t.Fatalf("unexpected resolved_url: %v", res.Output["resolved_url"])
+	}
+
+	failMissing := RunSandboxStep(ExecutionRequest{
+		NodeID:       lookupNode.ID,
+		Type:         lookupNode.Type,
+		Label:        lookupNode.Label,
+		Tool:         lookupNode.Tool,
+		PayloadMode:  "dynamic",
+		InputPayload: lookupNode.InputPayload,
+	}, &vt)
+	if failMissing.Status != "failed" {
+		t.Fatalf("expected missing required dynamic param to fail, got %q", failMissing.Status)
+	}
 }
