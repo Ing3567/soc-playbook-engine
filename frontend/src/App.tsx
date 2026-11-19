@@ -48,14 +48,18 @@ function buildGraphLayout(
   onRunNode: (id: string) => void,
   onChangeTool: (id: string, nextTool: string) => void,
   onEditPayload: (id: string) => void,
-  onCreateTool: (category: ToolCategory) => void
+  onCreateTool: (category: ToolCategory) => void,
+  onChangeRuntimeInput: (id: string, key: string, value: string) => void
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 90 })
 
-  const nodeHeight = (n: FlowNode) =>
-    n.type === 'lookup' || (n.input_payload && Object.keys(n.input_payload).length > 0) ? 140 : 116
+  const nodeHeight = (n: FlowNode) => {
+    if (n.type === 'lookup') return 164
+    if (n.type === 'action') return 148
+    return 116
+  }
 
   nodes.forEach((n) => g.setNode(n.id, { width: 256, height: nodeHeight(n) }))
   edges.forEach((e) => g.setEdge(e.source, e.target))
@@ -76,6 +80,7 @@ function buildGraphLayout(
         onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
         onEditPayload: () => onEditPayload(n.id),
         onCreateTool: (cat: ToolCategory) => onCreateTool(cat),
+        onChangeRuntimeInput: (key: string, value: string) => onChangeRuntimeInput(n.id, key, value),
       },
     }
   })
@@ -108,11 +113,12 @@ export default function App() {
   const [toolModalEditId, setToolModalEditId] = useState<string | null>(null)
   const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
   const [alertContext, setAlertContext] = useState({
-    src_ip: '198.51.100.42',
-    domain: 'malicious.example.com',
-    file_hash: '44d88612fea8a8f36de82e1278abb02f',
-    username: 'jdoe',
+    src_ip: '',
+    domain: '',
+    file_hash: '',
+    username: '',
   })
+  const [runtimeInputs, setRuntimeInputs] = useState<Record<string, Record<string, string>>>({})
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [nodeOutputs, setNodeOutputs] = useState<Record<string, Record<string, unknown>>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
@@ -135,6 +141,8 @@ export default function App() {
   toolsRef.current = tools
   const alertContextRef = useRef(alertContext)
   alertContextRef.current = alertContext
+  const runtimeInputsRef = useRef(runtimeInputs)
+  runtimeInputsRef.current = runtimeInputs
   const statusesRef = useRef(statuses)
   statusesRef.current = statuses
   const nodeOutputsRef = useRef(nodeOutputs)
@@ -178,22 +186,60 @@ export default function App() {
     reloadTools()
   }, [reloadPlaybooks, reloadTools])
 
+  const handleChangeRuntimeInput = useCallback((nodeId: string, key: string, value: string) => {
+    setRuntimeInputs((prev) => ({
+      ...prev,
+      [nodeId]: {
+        ...(prev[nodeId] || {}),
+        [key]: value,
+      },
+    }))
+  }, [])
+
   const changeNodeTool = useCallback(
     (nodeId: string, nextTool: string) => {
       skipNextLayoutRef.current = true
       invalidateFromNode(nodeId, true)
       const matched = toolsRef.current.find((t) => t.id === nextTool)
       const nextMode: PayloadMode | undefined = matched?.payload_mode || (matched?.params?.length ? 'dynamic' : undefined)
-      const nextPayload: Record<string, string> | undefined = matched?.params?.length
+      const nextParamModes: Record<string, PayloadMode> | undefined = matched?.params?.length
         ? Object.fromEntries(
-            matched.params.map((p) => [p.key, p.value || p.default_value || ''])
+            matched.params.map((p) => [p.key, p.mode || matched.payload_mode || 'dynamic'])
           )
         : undefined
+      const nextPayload: Record<string, string> | undefined = matched?.params?.length
+        ? Object.fromEntries(
+            matched.params
+              .map((p) => {
+                const mode = p.mode || matched.payload_mode || 'dynamic'
+                const val = (p.value || p.default_value || '').trim()
+                if (mode === 'fixed' || val.includes('{{')) {
+                  return [p.key, val]
+                }
+                return [p.key, '']
+              })
+              .filter(([, v]) => v !== '')
+          )
+        : undefined
+
+      setRuntimeInputs((prev) => {
+        if (!(nodeId in prev)) return prev
+        const next = { ...prev }
+        delete next[nodeId]
+        return next
+      })
 
       setNodes((prev) =>
         prev.map((n) =>
           n.id === nodeId
-            ? { ...n, tool: nextTool, tool_source: 'manual', payload_mode: nextMode, input_payload: nextPayload }
+            ? {
+                ...n,
+                tool: nextTool,
+                tool_source: 'manual',
+                payload_mode: nextMode,
+                param_modes: nextParamModes,
+                input_payload: nextPayload,
+              }
             : n
         )
       )
@@ -207,6 +253,7 @@ export default function App() {
                   tool: nextTool,
                   tool_source: 'manual',
                   payload_mode: nextMode,
+                  param_modes: nextParamModes,
                   input_payload: nextPayload,
                 },
               }
@@ -218,16 +265,16 @@ export default function App() {
   )
 
   const updateNodePayload = useCallback(
-    (nodeId: string, payloadMode: PayloadMode, inputPayload: Record<string, string>) => {
+    (nodeId: string, paramModes: Record<string, PayloadMode>, inputPayload: Record<string, string>) => {
       skipNextLayoutRef.current = true
       invalidateFromNode(nodeId, true)
       setNodes((prev) =>
-        prev.map((n) => (n.id === nodeId ? { ...n, payload_mode: payloadMode, input_payload: inputPayload } : n))
+        prev.map((n) => (n.id === nodeId ? { ...n, param_modes: paramModes, input_payload: inputPayload } : n))
       )
       setRfNodes((prev) =>
         prev.map((n) =>
           n.id === nodeId
-            ? { ...n, data: { ...n.data, payload_mode: payloadMode, input_payload: inputPayload } }
+            ? { ...n, data: { ...n.data, param_modes: paramModes, input_payload: inputPayload } }
             : n
         )
       )
@@ -259,7 +306,7 @@ export default function App() {
         nodes: extraContext?.nodes ?? nodeOutputsRef.current,
       }
       try {
-        const res = await executeStep(target, runtimeCtx)
+        const res = await executeStep(target, runtimeCtx, runtimeInputsRef.current[nodeId])
         const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
         setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
         if (nextStatus === 'success') {
@@ -318,11 +365,12 @@ export default function App() {
         setToolModalEditId(null)
         setToolModalCategory(cat)
         setToolModalOpen(true)
-      }
+      },
+      handleChangeRuntimeInput
     )
     setRfNodes(nextN)
     setRfEdges(nextE)
-  }, [nodes, edges, runNode, changeNodeTool, setRfNodes, setRfEdges])
+  }, [nodes, edges, runNode, changeNodeTool, handleChangeRuntimeInput, setRfNodes, setRfEdges])
 
   useEffect(() => {
     setRfNodes((prev) =>
@@ -334,6 +382,8 @@ export default function App() {
             ...n.data,
             status: statuses[n.id] || 'idle',
             availableTools: tools,
+            runtimeInputs: runtimeInputs[n.id] || {},
+            alertContext,
             pipelineAvailability: pInfo?.availability ?? 'ready',
             lockedReason: pInfo?.lockedReason ?? '',
           },
@@ -359,7 +409,7 @@ export default function App() {
         }
       })
     )
-  }, [statuses, tools, pipelineState, setRfNodes, setRfEdges])
+  }, [statuses, tools, pipelineState, runtimeInputs, alertContext, setRfNodes, setRfEdges])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
@@ -371,6 +421,7 @@ export default function App() {
       setEngine(data.engine || '-')
       setStatuses({})
       setNodeOutputs({})
+      setRuntimeInputs({})
       if (nextTitle) setTitle(nextTitle)
       return data
     } catch (e) {
@@ -403,7 +454,22 @@ export default function App() {
   async function handleSave() {
     if (nodes.length === 0) return setError('กรุณาสร้าง Flowchart ก่อนบันทึก')
     try {
-      const saved = await savePlaybook({ id: sopId, title, raw_text: text, engine, nodes, edges })
+      const sanitizedNodes = nodes.map((n) => {
+        if (!n.input_payload) return n
+        const toolDef = tools.find((t) => t.id === n.tool)
+        const cleaned: Record<string, string> = {}
+        for (const [k, v] of Object.entries(n.input_payload)) {
+          const val = v.trim()
+          if (!val) continue
+          const paramDef = toolDef?.params?.find((p) => p.key === k)
+          const mode = n.param_modes?.[k] || paramDef?.mode || n.payload_mode || toolDef?.payload_mode || 'dynamic'
+          if (mode === 'fixed' || val.includes('{{')) {
+            cleaned[k] = val
+          }
+        }
+        return { ...n, input_payload: Object.keys(cleaned).length > 0 ? cleaned : undefined }
+      })
+      const saved = await savePlaybook({ id: sopId, title, raw_text: text, engine, nodes: sanitizedNodes, edges })
       setSopId(saved.id)
       reloadPlaybooks()
     } catch (e) {
@@ -460,6 +526,7 @@ export default function App() {
   function handleResetExecution() {
     setStatuses({})
     setNodeOutputs({})
+    setRuntimeInputs({})
   }
 
   return (
@@ -478,6 +545,7 @@ export default function App() {
               setEdges([])
               setStatuses({})
               setNodeOutputs({})
+              setRuntimeInputs({})
               setLogs([])
               setError('')
             }}
@@ -602,16 +670,20 @@ export default function App() {
         </div>
 
         <div className="border-t pt-2">
-          <details className="text-xs">
+          <details className="text-xs" open>
             <summary className="cursor-pointer font-bold text-slate-700">
-              Dynamic Payload Context (Test Inputs)
+              Run Session Inputs (ไม่บันทึกลง SOP)
             </summary>
+            <p className="mt-1 text-[10px] text-slate-500">
+              ค่าสำหรับเคสปัจจุบันเท่านั้น (จะไม่ถูกเซฟไปกับ SOP)
+            </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5">
               <label className="text-[10px] font-semibold text-slate-600">
                 alert.src_ip
                 <input
                   type="text"
                   value={alertContext.src_ip}
+                  placeholder="เช่น 198.51.100.42"
                   onChange={(e) => setAlertContext((p) => ({ ...p, src_ip: e.target.value }))}
                   className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
                 />
@@ -621,6 +693,7 @@ export default function App() {
                 <input
                   type="text"
                   value={alertContext.domain}
+                  placeholder="เช่น evil-c2.example"
                   onChange={(e) => setAlertContext((p) => ({ ...p, domain: e.target.value }))}
                   className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
                 />
@@ -630,6 +703,7 @@ export default function App() {
                 <input
                   type="text"
                   value={alertContext.file_hash}
+                  placeholder="เช่น 44d88612..."
                   onChange={(e) => setAlertContext((p) => ({ ...p, file_hash: e.target.value }))}
                   className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
                 />
@@ -639,10 +713,41 @@ export default function App() {
                 <input
                   type="text"
                   value={alertContext.username}
+                  placeholder="เช่น alice"
                   onChange={(e) => setAlertContext((p) => ({ ...p, username: e.target.value }))}
                   className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
                 />
               </label>
+            </div>
+            <div className="mt-1.5 flex gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  setAlertContext({
+                    src_ip: '8.8.8.8',
+                    domain: 'example.com',
+                    file_hash: '44d88612fea8a8f36de82e1278abb02f',
+                    username: 'alice',
+                  })
+                }
+                className="rounded border border-slate-300 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                ใส่ค่าตัวอย่าง
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setAlertContext({
+                    src_ip: '',
+                    domain: '',
+                    file_hash: '',
+                    username: '',
+                  })
+                }
+                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                ล้างค่า
+              </button>
             </div>
           </details>
         </div>
@@ -663,6 +768,7 @@ export default function App() {
                     setEdges(item.edges || [])
                     setStatuses({})
                     setNodeOutputs({})
+                    setRuntimeInputs({})
                   }}
                   className="truncate text-left flex-1 font-medium hover:text-blue-600"
                 >
@@ -749,6 +855,7 @@ export default function App() {
             : {},
           nodes: nodeOutputs,
         }}
+        runtimeInputs={editingPayloadNodeId ? runtimeInputs[editingPayloadNodeId] : undefined}
         onClose={() => setEditingPayloadNodeId(null)}
         onSave={updateNodePayload}
         onEditTool={(toolId) => {
