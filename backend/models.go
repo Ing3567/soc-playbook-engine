@@ -15,14 +15,16 @@ type Branch struct {
 type Step struct {
 	Type     string   `json:"type" bson:"type"`
 	Label    string   `json:"label" bson:"label"`
+	Tool     string   `json:"tool,omitempty" bson:"tool,omitempty"`
 	Branches []Branch `json:"branches,omitempty" bson:"branches,omitempty"`
 }
 
 type Node struct {
-	ID    string `json:"id" bson:"id"`
-	Type  string `json:"type" bson:"type"`
-	Label string `json:"label" bson:"label"`
-	Tool  string `json:"tool" bson:"tool"`
+	ID         string `json:"id" bson:"id"`
+	Type       string `json:"type" bson:"type"`
+	Label      string `json:"label" bson:"label"`
+	Tool       string `json:"tool" bson:"tool"`
+	ToolSource string `json:"tool_source,omitempty" bson:"tool_source,omitempty"`
 }
 
 type Edge struct {
@@ -61,4 +63,19 @@ type ExportRequest struct {
 	Title string `json:"title"`
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
+}
+
+type ToolDefinition struct {
+	ID          string         `json:"id" bson:"_id"`
+	Name        string         `json:"name" bson:"name"`
+	Category    string         `json:"category" bson:"category"`
+	Description string         `json:"description" bson:"description"`
+	Keywords    []string       `json:"keywords" bson:"keywords"`
+	CommandType string         `json:"command_type" bson:"command_type"`
+	Endpoint    string         `json:"endpoint,omitempty" bson:"endpoint,omitempty"`
+	MockOutput  map[string]any `json:"mock_output,omitempty" bson:"mock_output,omitempty"`
+	IsBuiltin   bool           `json:"is_builtin" bson:"is_builtin"`
+	Enabled     bool           `json:"enabled" bson:"enabled"`
+	CreatedAt   time.Time      `json:"created_at" bson:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at" bson:"updated_at"`
 }
