@@ -174,7 +174,8 @@ export function LookupPayloadModal({
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
           <div className="min-w-0">
             <h3 className="text-sm font-bold text-slate-900 truncate">
-              ตั้งค่า Parameters (SOP Blueprint): {tool?.name || node.tool}
+              ตั้งค่า Parameters (SOP Blueprint):{' '}
+              {tool?.name || (node.tool === 'jira_ticket' || node.tool === 'ticket' ? 'Ticket' : node.tool)}
             </h3>
             <p className="text-[11px] text-slate-500 truncate">{node.label}</p>
           </div>

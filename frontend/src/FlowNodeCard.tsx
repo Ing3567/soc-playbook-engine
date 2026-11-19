@@ -1,11 +1,13 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { PayloadMode, RunStatus, ToolDefinition, ToolSource } from './types'
 import type { PipelineNodeAvailability } from './pipeline'
+import { getNodeParamItems } from './runtimeParams'
 
 export function FlowNodeCard({ data }: NodeProps) {
   const nodeType = String(data.type || 'action')
   const label = String(data.label || '')
-  const tool = String(data.tool || 'none')
+  const rawTool = String(data.tool || 'none')
+  const tool = rawTool === 'jira_ticket' ? 'ticket' : rawTool
   const toolSource = data.tool_source as ToolSource | undefined
   const payloadMode = data.payload_mode as PayloadMode | undefined
   const paramModes = (data.param_modes as Record<string, PayloadMode> | undefined) || {}
@@ -48,7 +50,7 @@ export function FlowNodeCard({ data }: NodeProps) {
 
   const canRun = nodeType === 'lookup' || nodeType === 'action'
   const matchedTool = availableTools.find((t) => t.id === tool)
-  const toolDisplay = matchedTool ? matchedTool.name : tool
+  const toolDisplay = matchedTool ? matchedTool.name : tool === 'ticket' ? 'Ticket' : tool
   const manualOptionId = nodeType === 'lookup' ? 'manual_lookup' : 'manual_action'
   const selectableTools = availableTools.filter((t) => t.enabled && t.category === nodeType)
 
@@ -65,74 +67,18 @@ export function FlowNodeCard({ data }: NodeProps) {
     sourceBadgeStyle = 'bg-slate-600 text-white'
   }
 
-  const effectiveMode: PayloadMode = payloadMode || matchedTool?.payload_mode || 'dynamic'
-  const paramItems: Array<{
-    key: string
-    location: string
-    mode: PayloadMode
-    blueprintVal: string
-    runtimeVal: string
-    sharedHint: string
-    required: boolean
-    isPipeTemplate: boolean
-  }> = []
-
-  const resolveAlertHint = (expr: string): string => {
-    if (!expr.includes('{{alert.')) return ''
-    let anyFilled = false
-    const resolved = expr.replace(/\{\{\s*alert\.([a-zA-Z0-9_]+)\s*\}\}/g, (_, k: string) => {
-      const v = sharedAlertContext[k]?.trim() || ''
-      if (v) anyFilled = true
-      return v
-    })
-    return anyFilled ? resolved : ''
-  }
-
-  if (canRun) {
-    const seen = new Set<string>()
-    for (const p of matchedTool?.params || []) {
-      seen.add(p.key)
-      const pMode: PayloadMode = paramModes[p.key] || p.mode || effectiveMode
-      const rawDef = p.value ?? p.default_value ?? ''
-      const blueprintVal =
-        inputPayload[p.key] ??
-        (pMode === 'fixed' || (rawDef.includes('{{') && rawDef.includes('}}')) ? rawDef : '')
-      const runtimeVal = nodeRuntimeInputs[p.key] ?? ''
-      const isPipeTemplate = pMode === 'dynamic' && blueprintVal.includes('{{prev.')
-      const sharedHint = pMode === 'dynamic' && !isPipeTemplate ? resolveAlertHint(blueprintVal) : ''
-      paramItems.push({
-        key: p.key,
-        location: p.in.toUpperCase(),
-        mode: pMode,
-        blueprintVal,
-        runtimeVal,
-        sharedHint,
-        required: Boolean(p.required),
-        isPipeTemplate,
-      })
-    }
-    for (const [k, v] of Object.entries(inputPayload)) {
-      if (!seen.has(k)) {
-        seen.add(k)
-        const pMode: PayloadMode = paramModes[k] || effectiveMode
-        const isPipeTemplate = pMode === 'dynamic' && v.includes('{{prev.')
-        const sharedHint = pMode === 'dynamic' && !isPipeTemplate ? resolveAlertHint(v) : ''
-        paramItems.push({
-          key: k,
-          location: 'PARAM',
-          mode: pMode,
-          blueprintVal: v,
-          runtimeVal: nodeRuntimeInputs[k] ?? '',
-          sharedHint,
-          required: false,
-          isPipeTemplate,
-        })
-      }
-    }
-  }
-
-  const fixedOrPipeItems = paramItems.filter((item) => item.mode === 'fixed' || item.isPipeTemplate)
-  const runtimeInputItems = paramItems.filter((item) => item.mode === 'dynamic' && !item.isPipeTemplate)
+  const { paramItems, fixedOrPipeItems, runtimeInputItems } = getNodeParamItems(
+    {
+      type: nodeType as 'terminal' | 'lookup' | 'action' | 'decision' | 'end',
+      tool,
+      payload_mode: payloadMode,
+      param_modes: paramModes,
+      input_payload: inputPayload,
+    },
+    availableTools,
+    nodeRuntimeInputs,
+    sharedAlertContext
+  )
 
   const isSkipped = pipelineAvailability === 'skipped'
   const isLocked = pipelineAvailability === 'locked'
@@ -293,7 +239,8 @@ export function FlowNodeCard({ data }: NodeProps) {
             <button
               type="button"
               disabled={isLocked || isSkipped || status === 'running'}
-              title={isLocked || isSkipped ? lockedReason : undefined}
+              title={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
+              aria-label={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
@@ -302,27 +249,25 @@ export function FlowNodeCard({ data }: NodeProps) {
                   onRun?.()
                 }
               }}
-              className={`nodrag nopan shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${
+              className={`nodrag nopan shrink-0 rounded py-0.5 text-[10px] font-semibold ${
                 isLocked || isSkipped
-                  ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                  ? 'px-1.5 bg-slate-200 text-slate-500 cursor-not-allowed'
                   : status === 'failed'
-                    ? 'bg-rose-600 text-white hover:bg-rose-700'
+                    ? 'px-2 bg-rose-600 text-white hover:bg-rose-700'
                     : status === 'success'
-                      ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                      : 'bg-blue-600 text-white hover:bg-blue-700'
+                      ? 'px-2 bg-emerald-600 text-white hover:bg-emerald-700'
+                      : 'px-2 bg-blue-600 text-white hover:bg-blue-700'
               }`}
             >
-              {isSkipped
-                ? '🔒 ข้ามกิ่ง'
-                : isLocked
-                  ? '🔒 รอโหนดบน'
-                  : status === 'running'
-                    ? 'Running...'
-                    : status === 'success'
-                      ? '↻ Re-run'
-                      : status === 'failed'
-                        ? '↻ Retry'
-                        : '▶ Run'}
+              {isSkipped || isLocked
+                ? '🔒'
+                : status === 'running'
+                  ? 'Running...'
+                  : status === 'success'
+                    ? '↻ Re-run'
+                    : status === 'failed'
+                      ? '↻ Retry'
+                      : '▶ Run'}
             </button>
           </div>
         </div>
