@@ -20,11 +20,13 @@ type Step struct {
 }
 
 type Node struct {
-	ID         string `json:"id" bson:"id"`
-	Type       string `json:"type" bson:"type"`
-	Label      string `json:"label" bson:"label"`
-	Tool       string `json:"tool" bson:"tool"`
-	ToolSource string `json:"tool_source,omitempty" bson:"tool_source,omitempty"`
+	ID           string            `json:"id" bson:"id"`
+	Type         string            `json:"type" bson:"type"`
+	Label        string            `json:"label" bson:"label"`
+	Tool         string            `json:"tool" bson:"tool"`
+	ToolSource   string            `json:"tool_source,omitempty" bson:"tool_source,omitempty"`
+	PayloadMode  string            `json:"payload_mode,omitempty" bson:"payload_mode,omitempty"`
+	InputPayload map[string]string `json:"input_payload,omitempty" bson:"input_payload,omitempty"`
 }
 
 type Edge struct {
@@ -45,10 +47,13 @@ type PlaybookDocument struct {
 }
 
 type ExecutionRequest struct {
-	NodeID string `json:"node_id"`
-	Type   string `json:"type"`
-	Label  string `json:"label"`
-	Tool   string `json:"tool"`
+	NodeID         string            `json:"node_id"`
+	Type           string            `json:"type"`
+	Label          string            `json:"label"`
+	Tool           string            `json:"tool"`
+	PayloadMode    string            `json:"payload_mode,omitempty"`
+	InputPayload   map[string]string `json:"input_payload,omitempty"`
+	RuntimeContext map[string]any    `json:"runtime_context,omitempty"`
 }
 
 type ExecutionResult struct {
@@ -65,17 +70,31 @@ type ExportRequest struct {
 	Edges []Edge `json:"edges"`
 }
 
+type ToolParameter struct {
+	Key          string `json:"key" bson:"key"`
+	Label        string `json:"label,omitempty" bson:"label,omitempty"`
+	In           string `json:"in" bson:"in"`
+	Mode         string `json:"mode" bson:"mode"`
+	Value        string `json:"value,omitempty" bson:"value,omitempty"`
+	DefaultValue string `json:"default_value,omitempty" bson:"default_value,omitempty"`
+	Required     bool   `json:"required,omitempty" bson:"required,omitempty"`
+}
+
 type ToolDefinition struct {
-	ID          string         `json:"id" bson:"_id"`
-	Name        string         `json:"name" bson:"name"`
-	Category    string         `json:"category" bson:"category"`
-	Description string         `json:"description" bson:"description"`
-	Keywords    []string       `json:"keywords" bson:"keywords"`
-	CommandType string         `json:"command_type" bson:"command_type"`
-	Endpoint    string         `json:"endpoint,omitempty" bson:"endpoint,omitempty"`
-	MockOutput  map[string]any `json:"mock_output,omitempty" bson:"mock_output,omitempty"`
-	IsBuiltin   bool           `json:"is_builtin" bson:"is_builtin"`
-	Enabled     bool           `json:"enabled" bson:"enabled"`
-	CreatedAt   time.Time      `json:"created_at" bson:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at" bson:"updated_at"`
+	ID              string          `json:"id" bson:"_id"`
+	Name            string          `json:"name" bson:"name"`
+	Category        string          `json:"category" bson:"category"`
+	Description     string          `json:"description" bson:"description"`
+	Keywords        []string        `json:"keywords" bson:"keywords"`
+	CommandType     string          `json:"command_type" bson:"command_type"`
+	HTTPMethod      string          `json:"http_method,omitempty" bson:"http_method,omitempty"`
+	Endpoint        string          `json:"endpoint,omitempty" bson:"endpoint,omitempty"`
+	PayloadMode     string          `json:"payload_mode,omitempty" bson:"payload_mode,omitempty"`
+	Params          []ToolParameter `json:"params,omitempty" bson:"params,omitempty"`
+	PayloadTemplate map[string]any  `json:"payload_template,omitempty" bson:"payload_template,omitempty"`
+	MockOutput      map[string]any  `json:"mock_output,omitempty" bson:"mock_output,omitempty"`
+	IsBuiltin       bool            `json:"is_builtin" bson:"is_builtin"`
+	Enabled         bool            `json:"enabled" bson:"enabled"`
+	CreatedAt       time.Time       `json:"created_at" bson:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at" bson:"updated_at"`
 }
