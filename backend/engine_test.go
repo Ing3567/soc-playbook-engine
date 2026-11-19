@@ -14,8 +14,23 @@ func TestOpenCaseNotConfusedWithCloseCase(t *testing.T) {
 	if got := inferStepType("ปิดเคส", tools); got != "end" {
 		t.Fatalf("inferStepType(ปิดเคส) = %q, want end", got)
 	}
-	if got := MatchToolByKeywords("action", "เปิดเคสแจ้งเตือนไปยัง Tier 2"); got != "jira_ticket" {
-		t.Fatalf("MatchToolByKeywords(เปิดเคส) = %q, want jira_ticket", got)
+	if got := MatchToolByKeywords("action", "เปิดเคสแจ้งเตือนไปยัง Tier 2"); got != "ticket" {
+		t.Fatalf("MatchToolByKeywords(เปิดเคส) = %q, want ticket", got)
+	}
+	if got := NormalizeLegacyToolID("jira_ticket"); got != "ticket" {
+		t.Fatalf("NormalizeLegacyToolID(jira_ticket) = %q, want ticket", got)
+	}
+	res := RunSandboxStep(ExecutionRequest{Tool: "ticket", Label: "เปิดเคสแจ้งเตือนไปยัง Tier 2"}, nil)
+	if res.Output["tool"] != "Ticket" {
+		t.Fatalf("RunSandboxStep(ticket) tool = %v, want Ticket", res.Output["tool"])
+	}
+	for _, td := range tools {
+		if td.ID == "ticket" && td.Name != "Ticket" {
+			t.Fatalf("builtin ticket tool Name = %q, want Ticket", td.Name)
+		}
+		if strings.EqualFold(td.Name, "Jira Ticket") {
+			t.Fatalf("unexpected builtin tool named %q", td.Name)
+		}
 	}
 }
 
