@@ -28,6 +28,7 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.DELETE("/api/sops/:id", h.DeletePlaybook)
 	r.GET("/api/tools", h.ListTools)
 	r.POST("/api/tools", h.CreateTool)
+	r.POST("/api/tools/test", h.TestToolDraft)
 	r.PUT("/api/tools/:id", h.UpdateTool)
 	r.DELETE("/api/tools/:id", h.DeleteTool)
 	r.POST("/api/execute", h.ExecuteStep)
@@ -200,6 +201,42 @@ func (h *ApiHandler) DeleteTool(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
+}
+
+type ToolTestRequest struct {
+	Tool           ToolDefinition `json:"tool"`
+	RuntimeContext map[string]any `json:"runtime_context,omitempty"`
+	Label          string         `json:"label,omitempty"`
+}
+
+func (h *ApiHandler) TestToolDraft(c *gin.Context) {
+	var req ToolTestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูลทดสอบ Tool ไม่ถูกต้อง"})
+		return
+	}
+	normalized, err := NormalizeAndValidateTool(req.Tool, false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "Dry Run: " + normalized.Name
+	}
+	execReq := ExecutionRequest{
+		NodeID:         "dry_run",
+		Type:           normalized.Category,
+		Label:          label,
+		Tool:           normalized.ID,
+		RuntimeContext: req.RuntimeContext,
+	}
+	built := BuildToolRequest(&normalized, execReq)
+	result := RunSandboxStep(execReq, &normalized)
+	c.JSON(http.StatusOK, gin.H{
+		"request": built,
+		"result":  result,
+	})
 }
 
 func (h *ApiHandler) ListPlaybooks(c *gin.Context) {
