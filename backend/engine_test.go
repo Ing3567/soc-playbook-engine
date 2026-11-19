@@ -351,3 +351,95 @@ func TestToolAutoDescriptionAndDryRun(t *testing.T) {
 		t.Fatalf("unexpected dry run resolved_url: %v", res.Output["resolved_url"])
 	}
 }
+
+func TestBuildToolRequestPerParamModesAndRuntimeInputs(t *testing.T) {
+	tool := ToolDefinition{
+		ID:          "abuseipdb",
+		Name:        "AbuseIPDB",
+		Category:    "lookup",
+		HTTPMethod:  "GET",
+		Endpoint:    "https://api.abuseipdb.com/api/v2/check",
+		PayloadMode: "dynamic",
+		Params: []ToolParameter{
+			{Key: "ipAddress", In: "query", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			{Key: "maxAgeInDays", In: "query", Mode: "fixed", Value: "90"},
+		},
+	}
+
+	built := BuildToolRequest(&tool, ExecutionRequest{
+		Tool: "abuseipdb",
+		ParamModes: map[string]string{
+			"ipAddress":    "dynamic",
+			"maxAgeInDays": "fixed",
+		},
+		InputPayload: map[string]string{
+			"maxAgeInDays": "30",
+		},
+		RuntimeInputs: map[string]string{
+			"ipAddress": "203.0.113.77",
+		},
+	})
+	if len(built.MissingRequired) != 0 {
+		t.Fatalf("expected no missing params, got %v", built.MissingRequired)
+	}
+	if built.URL != "https://api.abuseipdb.com/api/v2/check?ipAddress=203.0.113.77&maxAgeInDays=30" {
+		t.Fatalf("unexpected URL: %q", built.URL)
+	}
+}
+
+func TestSanitizePlaybookForSaveStripsRuntimeValues(t *testing.T) {
+	toolMap := map[string]ToolDefinition{
+		"jira_search": {
+			ID:          "jira_search",
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "jql", In: "query", Mode: "dynamic", Value: `text ~ "{{alert.src_ip}}"`},
+				{Key: "maxResults", In: "query", Mode: "fixed", Value: "10"},
+			},
+		},
+		"virustotal": {
+			ID:          "virustotal",
+			PayloadMode: "dynamic",
+			Params: []ToolParameter{
+				{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}"},
+			},
+		},
+	}
+
+	doc := PlaybookDocument{
+		ID:    "pb1",
+		Title: "Customer SOP",
+		Nodes: []Node{
+			{
+				ID:         "n1",
+				Type:       "lookup",
+				Tool:       "virustotal",
+				ParamModes: map[string]string{"ip": "dynamic"},
+				InputPayload: map[string]string{
+					"ip": "198.51.100.42", // raw customer IP must be stripped
+				},
+			},
+			{
+				ID:         "n2",
+				Type:       "lookup",
+				Tool:       "jira_search",
+				ParamModes: map[string]string{"jql": "dynamic", "maxResults": "fixed"},
+				InputPayload: map[string]string{
+					"jql":        `project = "SOC" AND text ~ "{{alert.src_ip}}"`, // template query must be kept
+					"maxResults": "25",                                            // fixed param must be kept
+				},
+			},
+		},
+	}
+
+	sanitized := SanitizePlaybookForSave(doc, toolMap)
+	if len(sanitized.Nodes[0].InputPayload) != 0 {
+		t.Fatalf("expected raw runtime IP to be stripped, got %v", sanitized.Nodes[0].InputPayload)
+	}
+	if sanitized.Nodes[1].InputPayload["jql"] != `project = "SOC" AND text ~ "{{alert.src_ip}}"` {
+		t.Fatalf("expected template query to be preserved, got %q", sanitized.Nodes[1].InputPayload["jql"])
+	}
+	if sanitized.Nodes[1].InputPayload["maxResults"] != "25" {
+		t.Fatalf("expected fixed param to be preserved, got %q", sanitized.Nodes[1].InputPayload["maxResults"])
+	}
+}
