@@ -9,7 +9,7 @@ import (
 
 var cleanWordRegex = regexp.MustCompile(`\b(clean|benign)\b`)
 
-func RunSandboxStep(req ExecutionRequest) ExecutionResult {
+func RunSandboxStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionResult {
 	start := time.Now()
 	time.Sleep(250 * time.Millisecond)
 
@@ -91,10 +91,29 @@ func RunSandboxStep(req ExecutionRequest) ExecutionResult {
 				"status":    "Created",
 			}
 		default:
-			output = map[string]any{
-				"tool":   "Manual SOC Procedure",
-				"step":   req.Label,
-				"result": "Completed",
+			if toolDef != nil {
+				output = make(map[string]any, len(toolDef.MockOutput)+4)
+				for k, v := range toolDef.MockOutput {
+					output[k] = v
+				}
+				if _, ok := output["tool"]; !ok {
+					output["tool"] = toolDef.Name
+				}
+				output["tool_id"] = toolDef.ID
+				output["step"] = req.Label
+				if len(toolDef.MockOutput) == 0 {
+					output["category"] = toolDef.Category
+					if toolDef.Endpoint != "" {
+						output["endpoint"] = toolDef.Endpoint
+					}
+					output["result"] = "Simulated Execution Completed"
+				}
+			} else {
+				output = map[string]any{
+					"tool":   "Manual SOC Procedure",
+					"step":   req.Label,
+					"result": "Completed",
+				}
 			}
 		}
 	}

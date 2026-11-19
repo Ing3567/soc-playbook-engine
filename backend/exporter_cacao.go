@@ -58,7 +58,10 @@ func cacaoStepType(n Node, isStart bool) string {
 	return "action"
 }
 
-func cacaoCommandType(tool string) string {
+func cacaoCommandType(tool string, toolMap map[string]ToolDefinition) string {
+	if def, ok := toolMap[tool]; ok && def.CommandType != "" {
+		return def.CommandType
+	}
 	switch tool {
 	case "virustotal", "abuseipdb", "jira_search", "firewall_block", "jira_ticket":
 		return "http-api"
@@ -67,7 +70,13 @@ func cacaoCommandType(tool string) string {
 	}
 }
 
-func BuildCacaoJSON(title string, nodes []Node, edges []Edge) ([]byte, error) {
+func BuildCacaoJSON(title string, nodes []Node, edges []Edge, toolMaps ...map[string]ToolDefinition) ([]byte, error) {
+	var toolMap map[string]ToolDefinition
+	if len(toolMaps) > 0 && toolMaps[0] != nil {
+		toolMap = toolMaps[0]
+	} else {
+		toolMap = make(map[string]ToolDefinition)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	workflow := make(map[string]CacaoStepItem, len(nodes))
 	outgoing := make(map[string][]Edge)
@@ -139,10 +148,14 @@ func BuildCacaoJSON(title string, nodes []Node, edges []Edge) ([]byte, error) {
 				Cases:  cases,
 			}
 		} else {
+			cmdText := n.Label
+			if def, ok := toolMap[n.Tool]; ok && def.Endpoint != "" {
+				cmdText = fmt.Sprintf("[%s] %s (%s)", def.Name, n.Label, def.Endpoint)
+			}
 			item = CacaoStepItem{
 				Type:     "action",
 				Name:     n.Label,
-				Commands: []CacaoCommand{{Type: cacaoCommandType(n.Tool), Command: n.Label}},
+				Commands: []CacaoCommand{{Type: cacaoCommandType(n.Tool, toolMap), Command: cmdText}},
 			}
 			if len(outs) > 0 {
 				item.OnCompletion = stepIDs[outs[0].Target]
