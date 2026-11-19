@@ -180,7 +180,11 @@ func NormalizeAndValidateTool(tool ToolDefinition, isCreate bool) (ToolDefinitio
 
 	tool.Description = strings.TrimSpace(tool.Description)
 	if tool.Description == "" {
-		return tool, fmt.Errorf("%w: description is required", ErrInvalidTool)
+		if tool.Category == "lookup" {
+			tool.Description = fmt.Sprintf("Lookup and query security data using %s", tool.Name)
+		} else {
+			tool.Description = fmt.Sprintf("Execute security response action using %s", tool.Name)
+		}
 	}
 
 	cleanedKeywords := make([]string, 0, len(tool.Keywords))
