@@ -10,6 +10,7 @@ export interface FlowNode {
   tool: string
   tool_source?: ToolSource
   payload_mode?: PayloadMode
+  param_modes?: Record<string, PayloadMode>
   input_payload?: Record<string, string>
 }
 

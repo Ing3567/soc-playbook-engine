@@ -8,7 +8,10 @@ export function FlowNodeCard({ data }: NodeProps) {
   const tool = String(data.tool || 'none')
   const toolSource = data.tool_source as ToolSource | undefined
   const payloadMode = data.payload_mode as PayloadMode | undefined
+  const paramModes = (data.param_modes as Record<string, PayloadMode> | undefined) || {}
   const inputPayload = (data.input_payload as Record<string, string> | undefined) || {}
+  const nodeRuntimeInputs = (data.runtimeInputs as Record<string, string> | undefined) || {}
+  const sharedAlertContext = (data.alertContext as Record<string, string> | undefined) || {}
   const status = (data.status as RunStatus) || 'idle'
   const pipelineAvailability = (data.pipelineAvailability as PipelineNodeAvailability | undefined) || 'ready'
   const lockedReason = (data.lockedReason as string | undefined) || ''
@@ -19,6 +22,7 @@ export function FlowNodeCard({ data }: NodeProps) {
   const onChangeTool = data.onChangeTool as ((nextTool: string) => void) | undefined
   const onEditPayload = data.onEditPayload as (() => void) | undefined
   const onCreateTool = data.onCreateTool as ((category: 'lookup' | 'action') => void) | undefined
+  const onChangeRuntimeInput = data.onChangeRuntimeInput as ((key: string, value: string) => void) | undefined
 
   let boxStyle = 'bg-slate-100 border-slate-400 text-slate-800 rounded-xl'
   let badge = 'ACTION'
@@ -62,40 +66,73 @@ export function FlowNodeCard({ data }: NodeProps) {
   }
 
   const effectiveMode: PayloadMode = payloadMode || matchedTool?.payload_mode || 'dynamic'
-  const payloadTags: Array<{
+  const paramItems: Array<{
     key: string
     location: string
     mode: PayloadMode
-    value: string
-    missing: boolean
+    blueprintVal: string
+    runtimeVal: string
+    sharedHint: string
+    required: boolean
+    isPipeTemplate: boolean
   }> = []
+
+  const resolveAlertHint = (expr: string): string => {
+    if (!expr.includes('{{alert.')) return ''
+    let anyFilled = false
+    const resolved = expr.replace(/\{\{\s*alert\.([a-zA-Z0-9_]+)\s*\}\}/g, (_, k: string) => {
+      const v = sharedAlertContext[k]?.trim() || ''
+      if (v) anyFilled = true
+      return v
+    })
+    return anyFilled ? resolved : ''
+  }
 
   if (canRun) {
     const seen = new Set<string>()
     for (const p of matchedTool?.params || []) {
       seen.add(p.key)
-      const val = inputPayload[p.key] ?? p.value ?? p.default_value ?? ''
-      const pMode: PayloadMode = payloadMode || p.mode || effectiveMode
-      payloadTags.push({
+      const pMode: PayloadMode = paramModes[p.key] || p.mode || effectiveMode
+      const rawDef = p.value ?? p.default_value ?? ''
+      const blueprintVal =
+        inputPayload[p.key] ??
+        (pMode === 'fixed' || (rawDef.includes('{{') && rawDef.includes('}}')) ? rawDef : '')
+      const runtimeVal = nodeRuntimeInputs[p.key] ?? ''
+      const isPipeTemplate = pMode === 'dynamic' && blueprintVal.includes('{{prev.')
+      const sharedHint = pMode === 'dynamic' && !isPipeTemplate ? resolveAlertHint(blueprintVal) : ''
+      paramItems.push({
         key: p.key,
         location: p.in.toUpperCase(),
         mode: pMode,
-        value: val,
-        missing: Boolean(p.required && !val.trim()),
+        blueprintVal,
+        runtimeVal,
+        sharedHint,
+        required: Boolean(p.required),
+        isPipeTemplate,
       })
     }
     for (const [k, v] of Object.entries(inputPayload)) {
       if (!seen.has(k)) {
-        payloadTags.push({
+        seen.add(k)
+        const pMode: PayloadMode = paramModes[k] || effectiveMode
+        const isPipeTemplate = pMode === 'dynamic' && v.includes('{{prev.')
+        const sharedHint = pMode === 'dynamic' && !isPipeTemplate ? resolveAlertHint(v) : ''
+        paramItems.push({
           key: k,
           location: 'PARAM',
-          mode: effectiveMode,
-          value: v,
-          missing: false,
+          mode: pMode,
+          blueprintVal: v,
+          runtimeVal: nodeRuntimeInputs[k] ?? '',
+          sharedHint,
+          required: false,
+          isPipeTemplate,
         })
       }
     }
   }
+
+  const fixedOrPipeItems = paramItems.filter((item) => item.mode === 'fixed' || item.isPipeTemplate)
+  const runtimeInputItems = paramItems.filter((item) => item.mode === 'dynamic' && !item.isPipeTemplate)
 
   const isSkipped = pipelineAvailability === 'skipped'
   const isLocked = pipelineAvailability === 'locked'
@@ -128,9 +165,9 @@ export function FlowNodeCard({ data }: NodeProps) {
 
       <div className="mt-1 text-xs font-semibold leading-snug">{label}</div>
 
-      {canRun && payloadTags.length > 0 && (
+      {canRun && fixedOrPipeItems.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">
-          {payloadTags.map((tag) => (
+          {fixedOrPipeItems.map((tag) => (
             <button
               key={`${tag.location}-${tag.key}`}
               type="button"
@@ -140,28 +177,63 @@ export function FlowNodeCard({ data }: NodeProps) {
                 e.stopPropagation()
                 onEditPayload?.()
               }}
-              title={`คลิกเพื่อแก้ไข ${tag.location} (${tag.mode}): ${tag.key}=${tag.value || '(empty)'}`}
+              title={`คลิกเพื่อแก้ไข ${tag.location} (${tag.mode}): ${tag.key}=${tag.blueprintVal || '(empty)'}`}
               className={`nodrag nopan cursor-pointer inline-flex items-center gap-1 max-w-full rounded px-1.5 py-0.5 text-[9px] font-mono border hover:brightness-95 ${
-                tag.missing
-                  ? 'bg-rose-50 border-rose-400 text-rose-800'
-                  : tag.mode === 'fixed'
-                    ? 'bg-amber-50 border-amber-300 text-amber-900'
-                    : 'bg-white/90 border-sky-300 text-sky-900'
+                tag.isPipeTemplate
+                  ? 'bg-violet-50 border-violet-300 text-violet-900'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
               }`}
             >
               <span className="font-bold opacity-75">{tag.location}</span>
               <span className="truncate max-w-[140px]">
-                {tag.key}={tag.value || '?'}
+                {tag.key}={tag.blueprintVal || '?'}
               </span>
               <span
                 className={`rounded px-1 text-[8px] font-bold uppercase ${
-                  tag.mode === 'fixed' ? 'bg-amber-200 text-amber-900' : 'bg-violet-100 text-violet-800'
+                  tag.isPipeTemplate ? 'bg-violet-200 text-violet-900' : 'bg-amber-200 text-amber-900'
                 }`}
               >
-                {tag.mode === 'fixed' ? 'FIX' : 'DYN'}
+                {tag.isPipeTemplate ? 'PIPE' : 'FIX'}
               </span>
             </button>
           ))}
+        </div>
+      )}
+
+      {canRun && runtimeInputItems.length > 0 && (
+        <div className="mt-1.5 space-y-1 no-print">
+          {runtimeInputItems.map((item) => {
+            const missingRequired = item.required && !item.runtimeVal.trim() && !item.sharedHint
+            return (
+              <div key={`rt-${item.key}`} className="flex items-center gap-1">
+                <span
+                  className="shrink-0 rounded bg-white/80 border border-slate-300 px-1 py-0.5 font-mono text-[9px] font-bold text-slate-700"
+                  title={`${item.location} (กรอกตอนรัน ไม่เซฟลง SOP)`}
+                >
+                  {item.key}
+                  {item.required && <span className="text-rose-600">*</span>}
+                </span>
+                <input
+                  type="text"
+                  value={item.runtimeVal}
+                  disabled={isSkipped}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    onChangeRuntimeInput?.(item.key, e.target.value)
+                  }}
+                  placeholder={item.sharedHint ? `Session: ${item.sharedHint}` : `กรอก ${item.key}...`}
+                  className={`nodrag nopan min-w-0 flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] outline-none ${
+                    missingRequired
+                      ? 'border-rose-400 bg-rose-50/80 text-rose-900 placeholder:text-rose-400'
+                      : 'border-slate-300 bg-white/95 text-slate-900 placeholder:text-slate-400 focus:border-blue-500'
+                  }`}
+                />
+              </div>
+            )
+          })}
         </div>
       )}
 
@@ -203,7 +275,7 @@ export function FlowNodeCard({ data }: NodeProps) {
           )}
 
           <div className="flex items-center gap-1 shrink-0">
-            {(nodeType === 'lookup' || payloadTags.length > 0) && onEditPayload && (
+            {(nodeType === 'lookup' || paramItems.length > 0) && onEditPayload && (
               <button
                 type="button"
                 onPointerDown={(e) => e.stopPropagation()}

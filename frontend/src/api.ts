@@ -132,7 +132,11 @@ export async function testToolDraft(
   return data
 }
 
-export async function executeStep(node: FlowNode, runtimeContext?: Record<string, unknown>) {
+export async function executeStep(
+  node: FlowNode,
+  runtimeContext?: Record<string, unknown>,
+  runtimeInputs?: Record<string, string>
+) {
   const res = await fetch('/api/execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -142,7 +146,9 @@ export async function executeStep(node: FlowNode, runtimeContext?: Record<string
       label: node.label,
       tool: node.tool,
       payload_mode: node.payload_mode,
+      param_modes: node.param_modes,
       input_payload: node.input_payload,
+      runtime_inputs: runtimeInputs,
       runtime_context: runtimeContext,
     }),
   })

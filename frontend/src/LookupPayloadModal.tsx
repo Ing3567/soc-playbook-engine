@@ -5,8 +5,13 @@ interface LookupPayloadModalProps {
   node: FlowNode | null
   tool?: ToolDefinition
   runtimeContext: Record<string, unknown>
+  runtimeInputs?: Record<string, string>
   onClose: () => void
-  onSave: (nodeId: string, payloadMode: PayloadMode, inputPayload: Record<string, string>) => void
+  onSave: (
+    nodeId: string,
+    paramModes: Record<string, PayloadMode>,
+    inputPayload: Record<string, string>
+  ) => void
   onEditTool?: (toolId: string) => void
 }
 
@@ -37,26 +42,45 @@ export function LookupPayloadModal({
   node,
   tool,
   runtimeContext,
+  runtimeInputs = {},
   onClose,
   onSave,
   onEditTool,
 }: LookupPayloadModalProps) {
-  const [mode, setMode] = useState<PayloadMode>('dynamic')
+  const [paramModes, setParamModes] = useState<Record<string, PayloadMode>>({})
   const [values, setValues] = useState<Record<string, string>>({})
   const [customKey, setCustomKey] = useState('')
 
   useEffect(() => {
     if (!node) return
-    const nextMode: PayloadMode = node.payload_mode || tool?.payload_mode || 'dynamic'
-    const initial: Record<string, string> = {}
+    const fallbackMode: PayloadMode = node.payload_mode || tool?.payload_mode || 'dynamic'
+    const initialModes: Record<string, PayloadMode> = {}
+    const initialValues: Record<string, string> = {}
+
     for (const p of tool?.params || []) {
-      initial[p.key] = node.input_payload?.[p.key] ?? p.value ?? p.default_value ?? ''
+      const m: PayloadMode = node.param_modes?.[p.key] || p.mode || fallbackMode
+      initialModes[p.key] = m
+      const savedVal = node.input_payload?.[p.key]
+      if (savedVal !== undefined) {
+        initialValues[p.key] = savedVal
+      } else if (m === 'fixed') {
+        initialValues[p.key] = p.value ?? p.default_value ?? ''
+      } else {
+        // Keep template expressions like {{alert.src_ip}} or query wrappers, never raw customer values
+        const defVal = p.value ?? p.default_value ?? ''
+        initialValues[p.key] = defVal.includes('{{') && defVal.includes('}}') ? defVal : ''
+      }
     }
+
     for (const [k, v] of Object.entries(node.input_payload || {})) {
-      if (!(k in initial)) initial[k] = v
+      if (!(k in initialValues)) {
+        initialModes[k] = node.param_modes?.[k] || fallbackMode
+        initialValues[k] = v
+      }
     }
-    setMode(nextMode)
-    setValues(initial)
+
+    setParamModes(initialModes)
+    setValues(initialValues)
     setCustomKey('')
   }, [node, tool])
 
@@ -74,11 +98,11 @@ export function LookupPayloadModal({
     const seen = new Set(base.map((p) => p.key))
     for (const k of Object.keys(values)) {
       if (!seen.has(k)) {
-        base.push({ key: k, in: 'query', mode })
+        base.push({ key: k, in: 'query', mode: paramModes[k] || 'dynamic' })
       }
     }
     return base
-  }, [tool, values, mode])
+  }, [tool, values, paramModes])
 
   const preview = useMemo(() => {
     const method = tool?.http_method || 'GET'
@@ -87,13 +111,21 @@ export function LookupPayloadModal({
     const bodyObj: Record<string, string> = {}
 
     for (const p of paramList) {
+      const pMode: PayloadMode = paramModes[p.key] || p.mode || 'dynamic'
       const raw = values[p.key] ?? ''
-      const resolved = resolvePreviewValue(raw, mode, runtimeContext)
+      const rt = runtimeInputs[p.key]?.trim()
+      const resolved =
+        pMode === 'fixed'
+          ? raw
+          : rt
+            ? rt
+            : resolvePreviewValue(raw, 'dynamic', runtimeContext)
+
       if (p.in === 'path') {
-        url = url.replaceAll(`{{${p.key}}}`, encodeURIComponent(resolved))
+        url = url.replaceAll(`{{${p.key}}}`, resolved ? encodeURIComponent(resolved) : `{{${p.key}}}`)
       } else if (p.in === 'query' && resolved !== '') {
         queryPairs.push([p.key, resolved])
-      } else if (p.in === 'body') {
+      } else if (p.in === 'body' && resolved !== '') {
         bodyObj[p.key] = resolved
       }
     }
@@ -104,13 +136,14 @@ export function LookupPayloadModal({
     }
 
     return { method, url, bodyObj }
-  }, [tool, paramList, values, mode, runtimeContext])
+  }, [tool, paramList, paramModes, values, runtimeContext, runtimeInputs])
 
   if (!node) return null
 
   function handleAddCustomParam() {
     const k = customKey.trim()
     if (!k) return
+    setParamModes((prev) => ({ ...prev, [k]: prev[k] || 'fixed' }))
     setValues((prev) => ({ ...prev, [k]: prev[k] ?? '' }))
     setCustomKey('')
   }
@@ -118,7 +151,15 @@ export function LookupPayloadModal({
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!node) return
-    onSave(node.id, mode, values)
+    const cleanedBlueprintValues: Record<string, string> = {}
+    for (const [k, v] of Object.entries(values)) {
+      const m = paramModes[k] || 'dynamic'
+      const isTemplate = v.includes('{{') && v.includes('}}')
+      if (m === 'fixed' || isTemplate) {
+        if (v !== '') cleanedBlueprintValues[k] = v
+      }
+    }
+    onSave(node.id, paramModes, cleanedBlueprintValues)
     onClose()
   }
 
@@ -133,7 +174,7 @@ export function LookupPayloadModal({
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
           <div className="min-w-0">
             <h3 className="text-sm font-bold text-slate-900 truncate">
-              {node.type === 'action' ? 'Action' : 'Lookup'} Input Payload: {tool?.name || node.tool}
+              ตั้งค่า Parameters (SOP Blueprint): {tool?.name || node.tool}
             </h3>
             <p className="text-[11px] text-slate-500 truncate">{node.label}</p>
           </div>
@@ -161,79 +202,97 @@ export function LookupPayloadModal({
         </div>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
-            <span className="text-xs font-bold text-slate-700">Payload Mode:</span>
-            <div className="flex rounded-lg border border-slate-300 bg-white p-0.5 text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => setMode('fixed')}
-                className={`rounded-md px-3 py-1 ${
-                  mode === 'fixed' ? 'bg-amber-500 text-white' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Fixed Payload (ค่าคงที่)
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode('dynamic')}
-                className={`rounded-md px-3 py-1 ${
-                  mode === 'dynamic' ? 'bg-violet-600 text-white' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Dynamic Payload (ตัวแปร {'{{...}}'})
-              </button>
-            </div>
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] text-sky-900">
+            <strong>แยกค่า SOP กับข้อมูลลูกค้า:</strong> เลือก <strong>📌 Fixed</strong> สำหรับค่าคงที่/Query ที่ต้องการเซฟไปพร้อม SOP และเลือก{' '}
+            <strong>✏️ Runtime</strong> สำหรับช่องที่ให้กรอกตอนรัน (จะแสดงเป็นช่องว่างบนการ์ดโหนดและไม่เซฟข้อมูลลูกค้าลง SOP)
           </div>
 
-          <div className="space-y-2">
-            {paramList.map((p) => (
-              <div key={`${p.in}-${p.key}`} className="rounded-lg border border-slate-200 p-2.5 bg-white">
-                <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-sky-800">
-                      {p.in}
-                    </span>
-                    <code className="text-xs font-bold text-slate-800">{p.key}</code>
-                    {p.label && <span className="text-[11px] text-slate-500">({p.label})</span>}
-                    {p.required && <span className="text-[10px] font-bold text-rose-600">*required</span>}
-                  </div>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                      mode === 'fixed' ? 'bg-amber-100 text-amber-800' : 'bg-violet-100 text-violet-800'
-                    }`}
-                  >
-                    {mode}
-                  </span>
-                </div>
+          <div className="space-y-2.5">
+            {paramList.map((p) => {
+              const pMode: PayloadMode = paramModes[p.key] || p.mode || 'dynamic'
+              const isFixed = pMode === 'fixed'
+              return (
+                <div key={`${p.in}-${p.key}`} className="rounded-lg border border-slate-200 p-2.5 bg-white space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-sky-800">
+                        {p.in}
+                      </span>
+                      <code className="text-xs font-bold text-slate-800">{p.key}</code>
+                      {p.label && <span className="text-[11px] text-slate-500">({p.label})</span>}
+                      {p.required && <span className="text-[10px] font-bold text-rose-600">*required</span>}
+                    </div>
 
-                <input
-                  type="text"
-                  value={values[p.key] ?? ''}
-                  onChange={(e) => setValues((prev) => ({ ...prev, [p.key]: e.target.value }))}
-                  placeholder={mode === 'fixed' ? 'ใส่ค่าคงที่ เช่น 8.8.8.8' : 'ใส่ตัวแปร เช่น {{alert.src_ip}}'}
-                  className="w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono text-xs"
-                />
-
-                {mode === 'dynamic' && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {DYNAMIC_VAR_CHIPS.map((chip) => (
+                    <div className="flex rounded-lg border border-slate-300 bg-slate-50 p-0.5 text-[11px] font-semibold">
                       <button
-                        key={chip}
                         type="button"
-                        onClick={() => setValues((prev) => ({ ...prev, [p.key]: chip }))}
-                        className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 font-mono text-[10px] text-violet-700 hover:bg-violet-100"
+                        onClick={() => setParamModes((prev) => ({ ...prev, [p.key]: 'fixed' }))}
+                        className={`rounded-md px-2 py-0.5 ${
+                          isFixed ? 'bg-amber-500 text-white' : 'text-slate-600 hover:text-slate-900'
+                        }`}
                       >
-                        {chip}
+                        📌 Fixed (เซฟลง SOP)
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() => setParamModes((prev) => ({ ...prev, [p.key]: 'dynamic' }))}
+                        className={`rounded-md px-2 py-0.5 ${
+                          !isFixed ? 'bg-violet-600 text-white' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        ✏️ Runtime (กรอกตอนรัน)
+                      </button>
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {isFixed ? (
+                    <div>
+                      <input
+                        type="text"
+                        value={values[p.key] ?? ''}
+                        onChange={(e) => setValues((prev) => ({ ...prev, [p.key]: e.target.value }))}
+                        placeholder="ใส่ค่าคงที่หรือ Query ที่ต้องการเซฟติดไปกับ SOP เช่น 90 หรือ deny"
+                        className="w-full rounded border border-amber-300 bg-amber-50/30 px-2.5 py-1.5 font-mono text-xs"
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <input
+                        type="text"
+                        value={values[p.key] ?? ''}
+                        onChange={(e) => setValues((prev) => ({ ...prev, [p.key]: e.target.value }))}
+                        placeholder="เว้นว่างเพื่อให้กรอกบนการ์ดตอนรัน หรือใส่ Template เช่น {{alert.src_ip}} / {{prev.verdict}}"
+                        className="w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono text-xs"
+                      />
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="text-[10px] text-slate-400">Template (ไม่เก็บค่าลูกค้า):</span>
+                        {DYNAMIC_VAR_CHIPS.map((chip) => (
+                          <button
+                            key={chip}
+                            type="button"
+                            onClick={() => setValues((prev) => ({ ...prev, [p.key]: chip }))}
+                            className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 font-mono text-[10px] text-violet-700 hover:bg-violet-100"
+                          >
+                            {chip}
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setValues((prev) => ({ ...prev, [p.key]: '' }))}
+                          className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-600 hover:bg-slate-100"
+                        >
+                          ปล่อยเป็นช่องว่าง
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
 
             {paramList.length === 0 && (
               <div className="rounded border border-dashed border-slate-300 p-3 text-center text-xs text-slate-500">
-                Tool นี้ยังไม่ได้กำหนด URL Parameters — สามารถเพิ่ม Key เองด้านล่าง หรือตั้งค่าที่หน้าจัดการ Tools
+                Tool นี้ยังไม่ได้กำหนด URL Parameters — สามารถเพิ่ม Parameter ด้านล่าง หรือตั้งค่าที่หน้าจัดการ Tools
               </div>
             )}
 
@@ -242,7 +301,7 @@ export function LookupPayloadModal({
                 type="text"
                 value={customKey}
                 onChange={(e) => setCustomKey(e.target.value)}
-                placeholder="เพิ่ม Parameter Key อื่นๆ (เช่น domain, hash)"
+                placeholder="เพิ่ม Parameter Key อื่นๆ (เช่น filter, env)"
                 className="flex-1 rounded border border-slate-300 px-2.5 py-1 text-xs"
               />
               <button
@@ -250,7 +309,7 @@ export function LookupPayloadModal({
                 onClick={handleAddCustomParam}
                 className="rounded border border-slate-300 bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
               >
-                + เพิ่ม Tag
+                + เพิ่ม Parameter
               </button>
             </div>
           </div>
@@ -277,7 +336,7 @@ export function LookupPayloadModal({
               type="submit"
               className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-blue-700"
             >
-              บันทึก Payload
+              บันทึกโครง SOP
             </button>
           </div>
         </form>
