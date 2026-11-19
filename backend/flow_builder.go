@@ -50,7 +50,7 @@ func MatchToolByCatalog(nodeType, label string, tools []ToolDefinition) string {
 		}
 		score := 0
 		for _, kw := range t.Keywords {
-			if t.ID == "jira_ticket" && strings.TrimSpace(kw) == "เคส" && isCloseCase {
+			if (t.ID == "ticket" || t.ID == "jira_ticket") && strings.TrimSpace(kw) == "เคส" && isCloseCase {
 				continue
 			}
 			if matchesToolKeyword(lower, kw) {
@@ -86,7 +86,7 @@ func ResolveStepTool(step Step, tools []ToolDefinition) (string, string) {
 
 	rawTool := strings.TrimSpace(step.Tool)
 	if rawTool != "" {
-		norm := strings.ToLower(rawTool)
+		norm := strings.ToLower(NormalizeLegacyToolID(rawTool))
 		for _, t := range tools {
 			if !t.Enabled {
 				continue

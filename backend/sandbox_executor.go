@@ -103,9 +103,9 @@ func RunSandboxStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionResu
 					"rule_id": fmt.Sprintf("FW-%d", time.Now().Unix()%10000),
 					"result":  "Blocked Successfully",
 				}
-			case "jira_ticket":
+			case "ticket", "jira_ticket":
 				output = map[string]any{
-					"tool":      "Jira Ticketing System",
+					"tool":      "Ticket",
 					"step":      req.Label,
 					"ticket_id": fmt.Sprintf("SOC-%d", 2000+time.Now().Unix()%1000),
 					"status":    "Created",

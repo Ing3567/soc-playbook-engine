@@ -289,6 +289,7 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "คำสั่งรันไม่ถูกต้อง"})
 		return
 	}
+	req.Tool = NormalizeLegacyToolID(req.Tool)
 	var toolDef *ToolDefinition
 	if h.toolRepo != nil && req.Tool != "" && req.Tool != "none" {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)

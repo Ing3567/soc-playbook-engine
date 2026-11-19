@@ -63,7 +63,7 @@ func cacaoCommandType(tool string, toolMap map[string]ToolDefinition) string {
 		return def.CommandType
 	}
 	switch tool {
-	case "virustotal", "abuseipdb", "jira_search", "firewall_block", "jira_ticket":
+	case "virustotal", "abuseipdb", "jira_search", "firewall_block", "ticket", "jira_ticket":
 		return "http-api"
 	default:
 		return "manual"
