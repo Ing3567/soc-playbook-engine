@@ -17,6 +17,7 @@ var ErrPlaybookNotFound = errors.New("playbook not found")
 
 type PlaybookRepository struct {
 	client     *mongo.Client
+	dbName     string
 	collection *mongo.Collection
 }
 
@@ -31,8 +32,14 @@ func NewPlaybookRepository(ctx context.Context, uri, dbName string) (*PlaybookRe
 	}
 	return &PlaybookRepository{
 		client:     client,
+		dbName:     dbName,
 		collection: client.Database(dbName).Collection("playbooks"),
 	}, nil
+}
+
+// Database returns the underlying MongoDB database handle.
+func (r *PlaybookRepository) Database() *mongo.Database {
+	return r.client.Database(r.dbName)
 }
 
 // Ping checks that MongoDB is still reachable (used by /api/health).
