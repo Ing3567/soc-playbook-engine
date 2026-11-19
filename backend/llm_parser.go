@@ -12,16 +12,21 @@ import (
 	"time"
 )
 
-const sopToTreePrompt = `You are a SOC assistant. Convert the SOP into a nested JSON tree.
-Return ONLY JSON: {"steps":[{"type":"lookup|decision|action|end","label":"short title","branches":[{"label":"condition","steps":[...]}]}]}
+const sopToTreePromptHeader = `You are a SOC assistant. Convert the SOP into a nested JSON tree and map each lookup/action step to the best matching tool.
+Return ONLY JSON: {"steps":[{"type":"lookup|decision|action|end","label":"short title","tool":"tool_id_or_none","branches":[{"label":"condition","steps":[...]}]}]}
 Rules:
 - "branches" is used ONLY by decision. It can have 2, 3 or more branches, and branches may contain nested decisions.
 - Indentation shows nesting. "else if" / "else" lines are at the same indent as their "if" and become extra branches of the SAME decision.
 - Lines less indented that come after a decision run after the branches merge.
 - type "end" = a step that stops that path (e.g. close case). Any branch may stop anywhere.
-- lookup = check reputation / search past cases.
+- lookup = check reputation, query logs, or search past cases.
+- Tool mapping:
+  - For "lookup" and "action" steps, set "tool" to the single best matching tool ID from Available Tools below based on meaning and intent.
+  - Use "manual_lookup" (for lookup) or "manual_action" (for action) only if no registered tool fits.
+  - For "decision" and "end" steps, ALWAYS set "tool" to "none".
+  - NEVER invent tool IDs outside Available Tools.
 
-SOP:
+Available Tools:
 `
 
 var (
@@ -29,42 +34,79 @@ var (
 	elseKeywordRegex = regexp.MustCompile(`(?i)^(else\b|otherwise\b|ไม่เช่นนั้น|มิฉะนั้น|ไม่งั้น)[\s:,\-–]*`)
 )
 
-func ConvertLinesToSteps(lines []Line) ([]Step, string) {
+func ConvertLinesToSteps(lines []Line, tools []ToolDefinition) ([]Step, string) {
 	provider := strings.ToLower(Config.LlmProvider)
 	var llmErr error
 	switch provider {
 	case "fallback", "none":
-		return ParseLinesByIndentation(lines), "fallback"
+		return ParseLinesByIndentation(lines, tools), "fallback"
 	case "hf_api":
 		var steps []Step
-		if steps, llmErr = queryHuggingFaceChatAPI(lines); llmErr == nil {
+		if steps, llmErr = queryHuggingFaceChatAPI(lines, tools); llmErr == nil {
 			return steps, "hf_api:" + Config.LlmModel
 		}
 	case "colab_ollama", "ollama":
 		var steps []Step
-		if steps, llmErr = queryOllamaGenerateAPI(lines); llmErr == nil {
+		if steps, llmErr = queryOllamaGenerateAPI(lines, tools); llmErr == nil {
 			return steps, provider + ":" + Config.LlmModel
 		}
 	}
 	if llmErr != nil {
 		log.Printf("LLM (%s) failed, using fallback parser: %v", provider, llmErr)
-		return ParseLinesByIndentation(lines), fmt.Sprintf("fallback (reason: %v)", llmErr)
+		return ParseLinesByIndentation(lines, tools), fmt.Sprintf("fallback (reason: %v)", llmErr)
 	}
-	return ParseLinesByIndentation(lines), "fallback"
+	return ParseLinesByIndentation(lines, tools), "fallback"
 }
 
-func formatIndentedPrompt(lines []Line) string {
+func formatToolCatalogForPrompt(tools []ToolDefinition) string {
+	var lookupLines []string
+	var actionLines []string
+	for _, t := range tools {
+		if !t.Enabled {
+			continue
+		}
+		kw := ""
+		if len(t.Keywords) > 0 {
+			kw = fmt.Sprintf(" (keywords: %s)", strings.Join(t.Keywords, ", "))
+		}
+		entry := fmt.Sprintf("- %s (%s): %s%s", t.ID, t.Name, t.Description, kw)
+		if t.Category == "lookup" {
+			lookupLines = append(lookupLines, entry)
+		} else {
+			actionLines = append(actionLines, entry)
+		}
+	}
 	var sb strings.Builder
+	sb.WriteString("[lookup]\n")
+	if len(lookupLines) > 0 {
+		sb.WriteString(strings.Join(lookupLines, "\n") + "\n")
+	} else {
+		sb.WriteString("- (none)\n")
+	}
+	sb.WriteString("[action]\n")
+	if len(actionLines) > 0 {
+		sb.WriteString(strings.Join(actionLines, "\n") + "\n")
+	} else {
+		sb.WriteString("- (none)\n")
+	}
+	return sb.String()
+}
+
+func buildSopToTreePrompt(lines []Line, tools []ToolDefinition) string {
+	var sb strings.Builder
+	sb.WriteString(sopToTreePromptHeader)
+	sb.WriteString(formatToolCatalogForPrompt(tools))
+	sb.WriteString("\nSOP:\n")
 	for _, l := range lines {
 		sb.WriteString(strings.Repeat("  ", l.Level) + l.Text + "\n")
 	}
-	return sopToTreePrompt + sb.String()
+	return sb.String()
 }
 
-func queryOllamaGenerateAPI(lines []Line) ([]Step, error) {
+func queryOllamaGenerateAPI(lines []Line, tools []ToolDefinition) ([]Step, error) {
 	payload, _ := json.Marshal(map[string]any{
 		"model":  Config.LlmModel,
-		"prompt": formatIndentedPrompt(lines),
+		"prompt": buildSopToTreePrompt(lines, tools),
 		"stream": false,
 		"format": "json",
 	})
@@ -87,7 +129,7 @@ func queryOllamaGenerateAPI(lines []Line) ([]Step, error) {
 	return extractStepsFromJSON(result.Response)
 }
 
-func queryHuggingFaceChatAPI(lines []Line) ([]Step, error) {
+func queryHuggingFaceChatAPI(lines []Line, tools []ToolDefinition) ([]Step, error) {
 	endpoint := Config.LlmEndpoint
 	if !strings.Contains(endpoint, "huggingface.co") {
 		endpoint = "https://router.huggingface.co/hf-inference/models/" + Config.LlmModel + "/v1/chat/completions"
@@ -95,10 +137,10 @@ func queryHuggingFaceChatAPI(lines []Line) ([]Step, error) {
 	payload, _ := json.Marshal(map[string]any{
 		"model": Config.LlmModel,
 		"messages": []map[string]string{
-			{"role": "user", "content": formatIndentedPrompt(lines)},
+			{"role": "user", "content": buildSopToTreePrompt(lines, tools)},
 		},
 		"temperature": 0.1,
-		"max_tokens":  2048,
+		"max_tokens":  3072,
 	})
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -146,12 +188,22 @@ func extractStepsFromJSON(raw string) ([]Step, error) {
 	return parsed.Steps, nil
 }
 
-func inferStepType(text string) string {
+func inferStepType(text string, tools []ToolDefinition) string {
 	lower := strings.ToLower(text)
 	if !strings.Contains(lower, "เปิดเคส") {
 		for _, kw := range []string{"ปิดเคส", "close case"} {
 			if strings.Contains(lower, kw) {
 				return "end"
+			}
+		}
+	}
+	for _, t := range tools {
+		if !t.Enabled || t.Category != "lookup" {
+			continue
+		}
+		for _, kw := range t.Keywords {
+			if kw != "" && matchesToolKeyword(lower, kw) {
+				return "lookup"
 			}
 		}
 	}
@@ -163,8 +215,8 @@ func inferStepType(text string) string {
 	return "action"
 }
 
-func createSimpleStep(text string) Step {
-	return Step{Type: inferStepType(text), Label: text}
+func createSimpleStep(text string, tools []ToolDefinition) Step {
+	return Step{Type: inferStepType(text, tools), Label: text}
 }
 
 func collectIndentedChildren(lines []Line, idx *int, parentLevel int) []Line {
@@ -175,17 +227,17 @@ func collectIndentedChildren(lines []Line, idx *int, parentLevel int) []Line {
 	return lines[start:*idx]
 }
 
-func ParseLinesByIndentation(lines []Line) []Step {
+func ParseLinesByIndentation(lines []Line, tools []ToolDefinition) []Step {
 	steps := []Step{}
 	for i := 0; i < len(lines); {
 		line := lines[i]
 		i++
 		if ifKeywordRegex.MatchString(line.Text) {
-			steps = append(steps, parseIfBlock(lines, &i, line.Text, line.Level))
+			steps = append(steps, parseIfBlock(lines, &i, line.Text, line.Level, tools))
 			continue
 		}
-		steps = append(steps, createSimpleStep(line.Text))
-		steps = append(steps, ParseLinesByIndentation(collectIndentedChildren(lines, &i, line.Level))...)
+		steps = append(steps, createSimpleStep(line.Text, tools))
+		steps = append(steps, ParseLinesByIndentation(collectIndentedChildren(lines, &i, line.Level), tools)...)
 	}
 	return steps
 }
@@ -201,29 +253,29 @@ func splitConditionAndAction(text string) (string, string) {
 	return text, ""
 }
 
-func parseBranchBlock(lines []Line, idx *int, level int, rawText string) Branch {
+func parseBranchBlock(lines []Line, idx *int, level int, rawText string, tools []ToolDefinition) Branch {
 	cond, inlineAct := splitConditionAndAction(rawText)
 	steps := []Step{}
 	if inlineAct != "" {
-		steps = append(steps, createSimpleStep(inlineAct))
+		steps = append(steps, createSimpleStep(inlineAct, tools))
 	}
-	steps = append(steps, ParseLinesByIndentation(collectIndentedChildren(lines, idx, level))...)
+	steps = append(steps, ParseLinesByIndentation(collectIndentedChildren(lines, idx, level), tools)...)
 	return Branch{Label: cond, Steps: steps}
 }
 
-func parseIfBlock(lines []Line, idx *int, text string, level int) Step {
-	branches := []Branch{parseBranchBlock(lines, idx, level, ifKeywordRegex.ReplaceAllString(text, ""))}
+func parseIfBlock(lines []Line, idx *int, text string, level int, tools []ToolDefinition) Step {
+	branches := []Branch{parseBranchBlock(lines, idx, level, ifKeywordRegex.ReplaceAllString(text, ""), tools)}
 	hasElse := false
 	for *idx < len(lines) && lines[*idx].Level == level && elseKeywordRegex.MatchString(lines[*idx].Text) {
 		rest := strings.TrimSpace(elseKeywordRegex.ReplaceAllString(lines[*idx].Text, ""))
 		*idx++
 		if ifKeywordRegex.MatchString(rest) {
-			branches = append(branches, parseBranchBlock(lines, idx, level, ifKeywordRegex.ReplaceAllString(rest, "")))
+			branches = append(branches, parseBranchBlock(lines, idx, level, ifKeywordRegex.ReplaceAllString(rest, ""), tools))
 			continue
 		}
-		elseBranch := Branch{Label: "อื่นๆ", Steps: ParseLinesByIndentation(collectIndentedChildren(lines, idx, level))}
+		elseBranch := Branch{Label: "อื่นๆ", Steps: ParseLinesByIndentation(collectIndentedChildren(lines, idx, level), tools)}
 		if rest != "" {
-			elseBranch.Steps = append([]Step{createSimpleStep(rest)}, elseBranch.Steps...)
+			elseBranch.Steps = append([]Step{createSimpleStep(rest, tools)}, elseBranch.Steps...)
 		}
 		branches = append(branches, elseBranch)
 		hasElse = true
