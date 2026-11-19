@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -22,6 +23,31 @@ func NewToolRepository(db *mongo.Database) *ToolRepository {
 
 func (r *ToolRepository) EnsureBuiltinTools(ctx context.Context) error {
 	now := time.Now()
+
+	// Migrate legacy built-in "jira_ticket" document to "ticket" so UI displays only "Ticket".
+	var legacyTool ToolDefinition
+	if err := r.collection.FindOne(ctx, bson.M{"_id": "jira_ticket", "is_builtin": true}).Decode(&legacyTool); err == nil {
+		count, countErr := r.collection.CountDocuments(ctx, bson.M{"_id": "ticket"})
+		if countErr != nil {
+			return countErr
+		}
+		if count == 0 {
+			legacyTool.ID = "ticket"
+			if strings.TrimSpace(legacyTool.Name) == "" || strings.EqualFold(strings.TrimSpace(legacyTool.Name), "Jira Ticket") {
+				legacyTool.Name = "Ticket"
+			}
+			legacyTool.UpdatedAt = now
+			if _, insertErr := r.collection.InsertOne(ctx, legacyTool); insertErr != nil && !mongo.IsDuplicateKeyError(insertErr) {
+				return insertErr
+			}
+		}
+		if _, delErr := r.collection.DeleteOne(ctx, bson.M{"_id": "jira_ticket", "is_builtin": true}); delErr != nil {
+			return delErr
+		}
+	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+		return err
+	}
+
 	for _, tool := range DefaultBuiltinTools() {
 		tool.CreatedAt = now
 		tool.UpdatedAt = now

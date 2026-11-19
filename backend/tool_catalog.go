@@ -97,8 +97,8 @@ func DefaultBuiltinTools() []ToolDefinition {
 			Enabled:   true,
 		},
 		{
-			ID:          "jira_ticket",
-			Name:        "Jira Ticket",
+			ID:          "ticket",
+			Name:        "Ticket",
 			Category:    "action",
 			Description: "Open or update an incident ticket, escalate to Tier 2, or record results in ticketing system",
 			Keywords:    []string{"ticket", "tier", "เปิดเคส", "เคส"},
@@ -113,6 +113,17 @@ func DefaultBuiltinTools() []ToolDefinition {
 			IsBuiltin: true,
 			Enabled:   true,
 		},
+	}
+}
+
+// NormalizeLegacyToolID maps retired built-in tool IDs to their current canonical IDs.
+func NormalizeLegacyToolID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	switch strings.ToLower(trimmed) {
+	case "jira_ticket", "jira ticket":
+		return "ticket"
+	default:
+		return trimmed
 	}
 }
 
@@ -244,7 +255,8 @@ func SanitizePlaybookForSave(doc PlaybookDocument, toolMap map[string]ToolDefini
 	sanitizedNodes := make([]Node, len(doc.Nodes))
 	for i, n := range doc.Nodes {
 		copyNode := n
-		toolDef, hasTool := toolMap[n.Tool]
+		copyNode.Tool = NormalizeLegacyToolID(n.Tool)
+		toolDef, hasTool := toolMap[copyNode.Tool]
 
 		if len(n.ParamModes) > 0 {
 			modes := make(map[string]string, len(n.ParamModes))

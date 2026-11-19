@@ -59,6 +59,11 @@ func (r *PlaybookRepository) ListAll(ctx context.Context) ([]PlaybookDocument, e
 	if err := cursor.All(ctx, &items); err != nil {
 		return nil, err
 	}
+	for i := range items {
+		for j := range items[i].Nodes {
+			items[i].Nodes[j].Tool = NormalizeLegacyToolID(items[i].Nodes[j].Tool)
+		}
+	}
 	return items, nil
 }
 
