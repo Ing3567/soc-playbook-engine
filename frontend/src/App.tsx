@@ -24,6 +24,7 @@ import type {
 } from './types'
 import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
 import { computePipelineState, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
+import { buildSopInputBlocks } from './runtimeParams'
 import { FlowNodeCard } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
@@ -112,18 +113,14 @@ export default function App() {
   const [toolModalCategory, setToolModalCategory] = useState<ToolCategory | undefined>(undefined)
   const [toolModalEditId, setToolModalEditId] = useState<string | null>(null)
   const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
-  const [alertContext, setAlertContext] = useState({
-    src_ip: '',
-    domain: '',
-    file_hash: '',
-    username: '',
-  })
+  const [alertContext, setAlertContext] = useState<Record<string, string>>({})
   const [runtimeInputs, setRuntimeInputs] = useState<Record<string, Record<string, string>>>({})
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [nodeOutputs, setNodeOutputs] = useState<Record<string, Record<string, unknown>>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [isRunningAll, setIsRunningAll] = useState(false)
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([])
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
@@ -131,6 +128,10 @@ export default function App() {
   const pipelineState = useMemo(
     () => computePipelineState(nodes, edges, statuses, nodeOutputs),
     [nodes, edges, statuses, nodeOutputs]
+  )
+  const sopInputData = useMemo(
+    () => buildSopInputBlocks(nodes, edges, tools, runtimeInputs, alertContext),
+    [nodes, edges, tools, runtimeInputs, alertContext]
   )
 
   const nodesRef = useRef<FlowNode[]>([])
@@ -478,48 +479,53 @@ export default function App() {
   }
 
   async function handleRunAll() {
-    if (nodes.length === 0) return
+    if (nodes.length === 0 || isRunningAll) return
+    setIsRunningAll(true)
     setStatuses({})
     setNodeOutputs({})
 
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-    const outgoing = new Map<string, FlowEdge[]>()
-    const inDegree = new Map<string, number>()
-    for (const n of nodes) inDegree.set(n.id, 0)
-    for (const e of edges) {
-      const list = outgoing.get(e.source) ?? []
-      list.push(e)
-      outgoing.set(e.source, list)
-      inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1)
-    }
-
-    const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
-    const visited = new Set<string>()
-    const localOutputs: Record<string, unknown> = {}
-    let current: FlowNode | undefined = startNode
-    let lastOutput: Record<string, unknown> | null = null
-
-    while (current && !visited.has(current.id)) {
-      visited.add(current.id)
-      const outEdges = outgoing.get(current.id) ?? []
-
-      if (current.type === 'lookup' || current.type === 'action') {
-        const res = await runNode(current.id, {
-          prev: lastOutput ?? {},
-          nodes: localOutputs,
-        })
-        if (!res.ok) break
-        lastOutput = res.output
-        if (res.output) {
-          localOutputs[current.id] = res.output
-        }
-      } else if (current.type === 'end') {
-        break
+    try {
+      const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+      const outgoing = new Map<string, FlowEdge[]>()
+      const inDegree = new Map<string, number>()
+      for (const n of nodes) inDegree.set(n.id, 0)
+      for (const e of edges) {
+        const list = outgoing.get(e.source) ?? []
+        list.push(e)
+        outgoing.set(e.source, list)
+        inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1)
       }
 
-      const nextEdge =
-        current.type === 'decision' ? pickDecisionEdge(outEdges, lastOutput) : outEdges[0]
-      current = nextEdge ? nodeMap.get(nextEdge.target) : undefined
+      const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
+      const visited = new Set<string>()
+      const localOutputs: Record<string, unknown> = {}
+      let current: FlowNode | undefined = startNode
+      let lastOutput: Record<string, unknown> | null = null
+
+      while (current && !visited.has(current.id)) {
+        visited.add(current.id)
+        const outEdges = outgoing.get(current.id) ?? []
+
+        if (current.type === 'lookup' || current.type === 'action') {
+          const res = await runNode(current.id, {
+            prev: lastOutput ?? {},
+            nodes: localOutputs,
+          })
+          if (!res.ok) break
+          lastOutput = res.output
+          if (res.output) {
+            localOutputs[current.id] = res.output
+          }
+        } else if (current.type === 'end') {
+          break
+        }
+
+        const nextEdge =
+          current.type === 'decision' ? pickDecisionEdge(outEdges, lastOutput) : outEdges[0]
+        current = nextEdge ? nodeMap.get(nextEdge.target) : undefined
+      }
+    } finally {
+      setIsRunningAll(false)
     }
   }
 
@@ -527,6 +533,7 @@ export default function App() {
     setStatuses({})
     setNodeOutputs({})
     setRuntimeInputs({})
+    setAlertContext({})
   }
 
   return (
@@ -591,20 +598,6 @@ export default function App() {
             className="col-span-2 rounded bg-emerald-600 py-1.5 text-xs font-bold text-white hover:bg-emerald-700"
           >
             Save (MongoDB)
-          </button>
-          <button
-            type="button"
-            onClick={handleRunAll}
-            className="rounded bg-indigo-600 py-1.5 text-xs font-bold text-white hover:bg-indigo-700"
-          >
-            ▶ Run Playbook
-          </button>
-          <button
-            type="button"
-            onClick={handleResetExecution}
-            className="rounded border border-slate-300 bg-white py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100"
-          >
-            ↺ Reset Run
           </button>
           <button
             type="button"
@@ -675,78 +668,149 @@ export default function App() {
               Run Session Inputs (ไม่บันทึกลง SOP)
             </summary>
             <p className="mt-1 text-[10px] text-slate-500">
-              ค่าสำหรับเคสปัจจุบันเท่านั้น (จะไม่ถูกเซฟไปกับ SOP)
+              ค่าสำหรับเคสปัจจุบันเท่านั้น (เชื่อม 2 ทางกับบล็อกในกราฟ และไม่เซฟลง SOP)
             </p>
+
+            {nodes.length === 0 ? (
+              <div className="mt-2 rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
+                สร้างหรือโหลด SOP เพื่อแสดงช่องกรอก Input ตามบล็อก
+              </div>
+            ) : sopInputData.blocks.length === 0 ? (
+              <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600">
+                SOP นี้ไม่มีช่องที่ต้องกรอกเพิ่ม สามารถกดรันได้เลย
+              </div>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {sopInputData.sharedAlertKeys.length > 0 && (
+                  <div className="rounded border border-indigo-200 bg-indigo-50/70 p-2">
+                    <div className="text-[10px] font-bold text-indigo-900 mb-1">
+                      ค่าใช้ร่วมกัน (Shared)
+                    </div>
+                    <div className="grid grid-cols-1 gap-1.5">
+                      {sopInputData.sharedAlertKeys.map((item) => (
+                        <label key={`shared-${item.key}`} className="text-[10px] font-semibold text-indigo-900">
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono">alert.{item.key}</span>
+                            <span className="text-[9px] font-normal text-indigo-700">
+                              ใช้ร่วมกัน {item.blockCount} บล็อก
+                            </span>
+                          </div>
+                          <input
+                            type="text"
+                            value={alertContext[item.key] || ''}
+                            placeholder={`กรอก ${item.key} (ใช้ทุกบล็อกที่ผูก)...`}
+                            onChange={(e) =>
+                              setAlertContext((p) => ({ ...p, [item.key]: e.target.value }))
+                            }
+                            className="mt-0.5 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 font-mono text-[11px] font-normal"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sopInputData.blocks.map((block) => {
+                  const nodeStatus = statuses[block.nodeId] || 'idle'
+                  const isSkipped = pipelineState.nodeStates[block.nodeId]?.availability === 'skipped'
+                  const statusDot =
+                    nodeStatus === 'running'
+                      ? 'bg-blue-500 animate-pulse'
+                      : nodeStatus === 'success'
+                        ? 'bg-emerald-500'
+                        : nodeStatus === 'failed'
+                          ? 'bg-rose-500'
+                          : 'bg-slate-300'
+
+                  return (
+                    <div
+                      key={`block-${block.nodeId}`}
+                      className={`rounded border p-2 transition-opacity ${
+                        isSkipped
+                          ? 'border-slate-200 bg-slate-50 opacity-50'
+                          : 'border-slate-200 bg-slate-50/80'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5 mb-1.5">
+                        <div className="flex items-center gap-1 min-w-0">
+                          <span
+                            className={`shrink-0 rounded px-1 py-0.5 text-[8px] font-bold uppercase ${
+                              block.nodeType === 'lookup'
+                                ? 'bg-sky-200 text-sky-900'
+                                : 'bg-slate-200 text-slate-800'
+                            }`}
+                          >
+                            {block.nodeType}
+                          </span>
+                          <span className="truncate text-[11px] font-semibold text-slate-800" title={block.label}>
+                            {block.stepIndex}. {block.label}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[9px] font-medium text-slate-500">{block.toolName}</span>
+                          <span className={`inline-block h-2 w-2 rounded-full ${statusDot}`} title={nodeStatus} />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        {block.fields.map((field) => {
+                          const missingRequired =
+                            field.required && !field.runtimeVal.trim() && !field.sharedHint
+                          return (
+                            <label key={`block-${block.nodeId}-${field.key}`} className="block text-[10px]">
+                              <div className="flex items-center justify-between gap-1 font-mono font-semibold text-slate-700">
+                                <span>
+                                  {field.key}
+                                  {field.required && <span className="text-rose-600">*</span>}
+                                </span>
+                                <span className="text-[9px] font-normal text-slate-400">
+                                  {field.location}
+                                </span>
+                              </div>
+                              <input
+                                type="text"
+                                value={field.runtimeVal}
+                                disabled={isSkipped}
+                                placeholder={
+                                  field.sharedHint
+                                    ? `Shared: ${field.sharedHint}`
+                                    : `กรอก ${field.key}...`
+                                }
+                                onChange={(e) =>
+                                  handleChangeRuntimeInput(block.nodeId, field.key, e.target.value)
+                                }
+                                className={`mt-0.5 w-full rounded border px-1.5 py-1 font-mono text-[11px] font-normal outline-none ${
+                                  missingRequired
+                                    ? 'border-rose-300 bg-rose-50/70 text-rose-900 placeholder:text-rose-400'
+                                    : 'border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-blue-500'
+                                }`}
+                              />
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
             <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <label className="text-[10px] font-semibold text-slate-600">
-                alert.src_ip
-                <input
-                  type="text"
-                  value={alertContext.src_ip}
-                  placeholder="เช่น 198.51.100.42"
-                  onChange={(e) => setAlertContext((p) => ({ ...p, src_ip: e.target.value }))}
-                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
-                />
-              </label>
-              <label className="text-[10px] font-semibold text-slate-600">
-                alert.domain
-                <input
-                  type="text"
-                  value={alertContext.domain}
-                  placeholder="เช่น evil-c2.example"
-                  onChange={(e) => setAlertContext((p) => ({ ...p, domain: e.target.value }))}
-                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
-                />
-              </label>
-              <label className="text-[10px] font-semibold text-slate-600">
-                alert.file_hash
-                <input
-                  type="text"
-                  value={alertContext.file_hash}
-                  placeholder="เช่น 44d88612..."
-                  onChange={(e) => setAlertContext((p) => ({ ...p, file_hash: e.target.value }))}
-                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
-                />
-              </label>
-              <label className="text-[10px] font-semibold text-slate-600">
-                alert.username
-                <input
-                  type="text"
-                  value={alertContext.username}
-                  placeholder="เช่น alice"
-                  onChange={(e) => setAlertContext((p) => ({ ...p, username: e.target.value }))}
-                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
-                />
-              </label>
-            </div>
-            <div className="mt-1.5 flex gap-1.5">
               <button
                 type="button"
-                onClick={() =>
-                  setAlertContext({
-                    src_ip: '8.8.8.8',
-                    domain: 'example.com',
-                    file_hash: '44d88612fea8a8f36de82e1278abb02f',
-                    username: 'alice',
-                  })
-                }
-                className="rounded border border-slate-300 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-100"
+                onClick={handleRunAll}
+                disabled={nodes.length === 0 || isRunningAll}
+                className="rounded bg-indigo-600 py-1.5 text-[11px] font-bold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                ใส่ค่าตัวอย่าง
+                {isRunningAll ? 'กำลังรัน...' : '▶ รันทั้งหมด'}
               </button>
               <button
                 type="button"
-                onClick={() =>
-                  setAlertContext({
-                    src_ip: '',
-                    domain: '',
-                    file_hash: '',
-                    username: '',
-                  })
-                }
-                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 hover:bg-slate-100"
+                onClick={handleResetExecution}
+                disabled={nodes.length === 0 && Object.keys(runtimeInputs).length === 0 && Object.keys(alertContext).length === 0}
+                className="rounded border border-slate-300 bg-white py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               >
-                ล้างค่า
+                ↺ รีเซ็ต / ล้างค่า
               </button>
             </div>
           </details>
