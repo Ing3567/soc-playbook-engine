@@ -19,6 +19,7 @@ import type {
   RunStatus,
   ExecutionLog,
   ToolDefinition,
+  ToolCategory,
   PayloadMode,
 } from './types'
 import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
@@ -45,19 +46,23 @@ function buildGraphLayout(
   availableTools: ToolDefinition[],
   onRunNode: (id: string) => void,
   onChangeTool: (id: string, nextTool: string) => void,
-  onEditPayload: (id: string) => void
+  onEditPayload: (id: string) => void,
+  onCreateTool: (category: ToolCategory) => void
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 90 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: 256, height: n.type === 'lookup' ? 136 : 116 }))
+  const nodeHeight = (n: FlowNode) =>
+    n.type === 'lookup' || (n.input_payload && Object.keys(n.input_payload).length > 0) ? 140 : 116
+
+  nodes.forEach((n) => g.setNode(n.id, { width: 256, height: nodeHeight(n) }))
   edges.forEach((e) => g.setEdge(e.source, e.target))
   dagre.layout(g)
 
   const rfNodes: RFNode[] = nodes.map((n) => {
     const pos = g.node(n.id)
-    const h = n.type === 'lookup' ? 136 : 116
+    const h = nodeHeight(n)
     return {
       id: n.id,
       type: 'socNode',
@@ -69,6 +74,7 @@ function buildGraphLayout(
         onRun: () => onRunNode(n.id),
         onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
         onEditPayload: () => onEditPayload(n.id),
+        onCreateTool: (cat: ToolCategory) => onCreateTool(cat),
       },
     }
   })
@@ -97,6 +103,8 @@ export default function App() {
   const [tools, setTools] = useState<ToolDefinition[]>([])
   const [toolsLoadError, setToolsLoadError] = useState('')
   const [toolModalOpen, setToolModalOpen] = useState(false)
+  const [toolModalCategory, setToolModalCategory] = useState<ToolCategory | undefined>(undefined)
+  const [toolModalEditId, setToolModalEditId] = useState<string | null>(null)
   const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
   const [alertContext, setAlertContext] = useState({
     src_ip: '198.51.100.42',
@@ -258,7 +266,12 @@ export default function App() {
       toolsRef.current,
       runNode,
       changeNodeTool,
-      (id) => setEditingPayloadNodeId(id)
+      (id) => setEditingPayloadNodeId(id),
+      (cat) => {
+        setToolModalEditId(null)
+        setToolModalCategory(cat)
+        setToolModalOpen(true)
+      }
     )
     setRfNodes(nextN)
     setRfEdges(nextE)
@@ -457,10 +470,14 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setToolModalOpen(true)}
-            className="col-span-2 rounded border border-slate-300 bg-slate-100 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-200"
+            onClick={() => {
+              setToolModalEditId(null)
+              setToolModalCategory(undefined)
+              setToolModalOpen(true)
+            }}
+            className="col-span-2 rounded border border-sky-300 bg-sky-50 py-1.5 text-xs font-bold text-sky-900 hover:bg-sky-100"
           >
-            จัดการ Tools ({tools.filter((t) => t.enabled).length}/{tools.length})
+            ⚙ จัดการ Tools ({tools.filter((t) => t.enabled).length}/{tools.length} ใช้งาน)
           </button>
         </div>
 
@@ -638,7 +655,14 @@ export default function App() {
         open={toolModalOpen}
         tools={tools}
         loadError={toolsLoadError}
-        onClose={() => setToolModalOpen(false)}
+        initialCategory={toolModalCategory}
+        initialEditToolId={toolModalEditId}
+        runtimeContext={{ alert: alertContext }}
+        onClose={() => {
+          setToolModalOpen(false)
+          setToolModalEditId(null)
+          setToolModalCategory(undefined)
+        }}
         onChanged={reloadTools}
       />
 
@@ -648,6 +672,11 @@ export default function App() {
         runtimeContext={{ alert: alertContext }}
         onClose={() => setEditingPayloadNodeId(null)}
         onSave={updateNodePayload}
+        onEditTool={(toolId) => {
+          setToolModalCategory(undefined)
+          setToolModalEditId(toolId)
+          setToolModalOpen(true)
+        }}
       />
     </div>
   )
