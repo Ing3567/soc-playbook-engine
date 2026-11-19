@@ -1,4 +1,4 @@
-import type { FlowNode, FlowEdge, PlaybookItem } from './types'
+import type { FlowNode, FlowEdge, PlaybookItem, ToolDefinition, ToolPayload } from './types'
 
 export async function generateFlowchart(form: FormData) {
   const res = await fetch('/api/generate', { method: 'POST', body: form })
@@ -35,6 +35,43 @@ export async function deletePlaybook(id: string) {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
     throw new Error(data.error || 'ลบไม่สำเร็จ')
+  }
+}
+
+export async function getTools(): Promise<ToolDefinition[]> {
+  const res = await fetch('/api/tools')
+  if (!res.ok) return []
+  const data = await res.json()
+  return Array.isArray(data) ? data : []
+}
+
+export async function createTool(payload: ToolPayload): Promise<ToolDefinition> {
+  const res = await fetch('/api/tools', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'สร้าง Tool ไม่สำเร็จ')
+  return data
+}
+
+export async function updateTool(id: string, payload: ToolPayload): Promise<ToolDefinition> {
+  const res = await fetch(`/api/tools/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'อัปเดต Tool ไม่สำเร็จ')
+  return data
+}
+
+export async function deleteTool(id: string) {
+  const res = await fetch(`/api/tools/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || 'ลบ Tool ไม่สำเร็จ')
   }
 }
 

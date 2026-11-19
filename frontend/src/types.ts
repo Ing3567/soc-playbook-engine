@@ -1,8 +1,11 @@
+export type ToolSource = 'ai' | 'keyword' | 'manual'
+
 export interface FlowNode {
   id: string
   type: string
   label: string
   tool: string
+  tool_source?: ToolSource
 }
 
 export interface FlowEdge {
@@ -32,3 +35,23 @@ export interface ExecutionLog {
   timestamp: string
   output: Record<string, unknown>
 }
+
+export type ToolCategory = 'lookup' | 'action'
+export type ToolCommandType = 'http-api' | 'manual' | 'bash' | 'ssh'
+
+export interface ToolDefinition {
+  id: string
+  name: string
+  category: ToolCategory
+  description: string
+  keywords: string[]
+  command_type: ToolCommandType
+  endpoint?: string
+  mock_output?: Record<string, unknown>
+  is_builtin: boolean
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ToolPayload = Omit<ToolDefinition, 'is_builtin' | 'created_at' | 'updated_at'>
