@@ -7,8 +7,10 @@ export function FlowNodeCard({ data }: NodeProps) {
   const tool = String(data.tool || 'none')
   const toolSource = data.tool_source as ToolSource | undefined
   const status = (data.status as RunStatus) || 'idle'
-  const availableTools = (data.availableTools as ToolDefinition[]) || []
-  const onRun = data.onRun as () => void
+  const availableTools = Array.isArray(data.availableTools)
+    ? (data.availableTools as ToolDefinition[])
+    : []
+  const onRun = data.onRun as (() => void) | undefined
   const onChangeTool = data.onChangeTool as ((nextTool: string) => void) | undefined
 
   let boxStyle = 'bg-slate-100 border-slate-400 text-slate-800 rounded-xl'
@@ -60,7 +62,7 @@ export function FlowNodeCard({ data }: NodeProps) {
         <div className="flex items-center gap-1 min-w-0">
           {tool !== 'none' && <span className="truncate uppercase">{toolDisplay}</span>}
           {sourceLabel && (
-            <span className={`rounded px-1 py-0.2 text-[9px] font-bold ${sourceBadgeStyle}`}>
+            <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] leading-none font-bold ${sourceBadgeStyle}`}>
               {sourceLabel}
             </span>
           )}
@@ -72,13 +74,15 @@ export function FlowNodeCard({ data }: NodeProps) {
           {onChangeTool ? (
             <select
               value={tool}
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 e.stopPropagation()
                 onChangeTool(e.target.value)
               }}
               aria-label="Select tool"
-              className="max-w-[145px] truncate rounded border border-slate-300 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-800"
+              className="nodrag nopan max-w-[145px] truncate rounded border border-slate-300 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-800 cursor-pointer"
             >
               {selectableTools.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -97,11 +101,13 @@ export function FlowNodeCard({ data }: NodeProps) {
           )}
           <button
             type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation()
-              onRun()
+              onRun?.()
             }}
-            className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-blue-700"
+            className="nodrag nopan shrink-0 rounded bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-blue-700"
           >
             {status === 'running' ? 'Running...' : '▶ Run'}
           </button>
