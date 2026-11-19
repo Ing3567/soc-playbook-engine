@@ -1,5 +1,14 @@
 import { useState, useMemo, useEffect, type FormEvent } from 'react'
-import type { ToolCategory, ToolCommandType, ToolDefinition, ToolPayload } from './types'
+import type {
+  HTTPMethod,
+  ParamLocation,
+  PayloadMode,
+  ToolCategory,
+  ToolCommandType,
+  ToolDefinition,
+  ToolParameter,
+  ToolPayload,
+} from './types'
 import { createTool, updateTool, deleteTool } from './api'
 
 interface ToolManagerModalProps {
@@ -17,7 +26,10 @@ interface FormState {
   description: string
   keywordsText: string
   command_type: ToolCommandType
+  http_method: HTTPMethod
   endpoint: string
+  payload_mode: PayloadMode
+  params: ToolParameter[]
   mockOutputText: string
   enabled: boolean
 }
@@ -29,7 +41,10 @@ const EMPTY_FORM: FormState = {
   description: '',
   keywordsText: '',
   command_type: 'http-api',
+  http_method: 'GET',
   endpoint: '',
+  payload_mode: 'dynamic',
+  params: [],
   mockOutputText: '',
   enabled: true,
 }
@@ -42,6 +57,15 @@ function slugifyName(name: string): string {
     .replace(/[^a-z0-9_]+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
+}
+
+function extractUrlPlaceholders(endpoint: string): string[] {
+  const matches = endpoint.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)
+  const seen = new Set<string>()
+  for (const m of matches) {
+    if (m[1]) seen.add(m[1])
+  }
+  return Array.from(seen)
 }
 
 export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }: ToolManagerModalProps) {
@@ -77,6 +101,26 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
     })
   }, [tools, filterCat, search])
 
+  const urlPreview = useMemo(() => {
+    let url = form.endpoint.trim()
+    if (!url) return ''
+    const queryParts: string[] = []
+    for (const p of form.params) {
+      const k = p.key.trim()
+      if (!k) continue
+      const v = (p.value || '').trim() || `{{${k}}}`
+      if (p.in === 'path') {
+        url = url.replaceAll(`{{${k}}}`, v)
+      } else if (p.in === 'query') {
+        queryParts.push(`${k}=${v}`)
+      }
+    }
+    if (queryParts.length > 0) {
+      url += (url.includes('?') ? '&' : '?') + queryParts.join('&')
+    }
+    return `${form.http_method} ${url}`
+  }, [form.endpoint, form.http_method, form.params])
+
   if (!open) return null
 
   function startCreate() {
@@ -96,7 +140,10 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
       description: tool.description,
       keywordsText: (Array.isArray(tool.keywords) ? tool.keywords : []).join(', '),
       command_type: tool.command_type || 'http-api',
+      http_method: tool.http_method || (tool.category === 'lookup' ? 'GET' : 'POST'),
       endpoint: tool.endpoint || '',
+      payload_mode: tool.payload_mode || 'dynamic',
+      params: Array.isArray(tool.params) ? tool.params.map((p) => ({ ...p })) : [],
       mockOutputText:
         tool.mock_output && Object.keys(tool.mock_output).length > 0
           ? JSON.stringify(tool.mock_output, null, 2)
@@ -104,6 +151,24 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
       enabled: tool.enabled,
     })
     setFormError('')
+  }
+
+  function handleSyncParamsFromUrl() {
+    const keys = extractUrlPlaceholders(form.endpoint)
+    if (keys.length === 0) return
+    setForm((prev) => {
+      const existing = new Set(prev.params.map((p) => p.key))
+      const added: ToolParameter[] = keys
+        .filter((k) => !existing.has(k))
+        .map((k) => ({
+          key: k,
+          in: 'path',
+          mode: prev.payload_mode,
+          value: `{{alert.${k === 'ip' ? 'src_ip' : k}}}`,
+          required: true,
+        }))
+      return { ...prev, params: [...prev.params, ...added] }
+    })
   }
 
   async function handleToggleEnabled(tool: ToolDefinition) {
@@ -116,7 +181,11 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
         description: tool.description,
         keywords: Array.isArray(tool.keywords) ? tool.keywords : [],
         command_type: tool.command_type || 'http-api',
+        http_method: tool.http_method,
         endpoint: tool.endpoint || '',
+        payload_mode: tool.payload_mode,
+        params: tool.params,
+        payload_template: tool.payload_template,
         mock_output: tool.mock_output,
         enabled: !tool.enabled,
       })
@@ -166,6 +235,14 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
       .map((s) => s.trim())
       .filter(Boolean)
 
+    const cleanedParams = form.params
+      .map((p) => ({
+        ...p,
+        key: p.key.trim(),
+        value: (p.value || '').trim(),
+      }))
+      .filter((p) => p.key !== '')
+
     const payload: ToolPayload = {
       id: (form.id || slugifyName(form.name)).trim(),
       name: form.name.trim(),
@@ -173,7 +250,10 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
       description: form.description.trim(),
       keywords,
       command_type: form.command_type,
+      http_method: form.http_method,
       endpoint: form.endpoint.trim() || undefined,
+      payload_mode: form.payload_mode,
+      params: cleanedParams,
       mock_output: parsedMock,
       enabled: form.enabled,
     }
@@ -295,6 +375,11 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
                           </span>
                         </div>
                         <p className="mt-1 text-xs text-slate-600">{t.description}</p>
+                        {t.endpoint && (
+                          <div className="mt-1 font-mono text-[10px] text-slate-500 truncate">
+                            <span className="font-bold text-slate-700">{t.http_method || 'GET'}</span> {t.endpoint}
+                          </div>
+                        )}
                         {keywords.length > 0 && (
                           <div className="mt-1.5 flex flex-wrap gap-1">
                             {keywords.map((kw) => (
@@ -302,6 +387,11 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
                                 {kw}
                               </span>
                             ))}
+                            {(t.params?.length || 0) > 0 && (
+                              <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 border border-sky-200">
+                                {t.params!.length} params ({t.payload_mode || 'dynamic'})
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -432,13 +522,13 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
               />
             </label>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <label className="text-xs font-semibold text-slate-700">
-                CACAO Command Type
+                CACAO Type
                 <select
                   value={form.command_type}
                   onChange={(e) => setForm((prev) => ({ ...prev, command_type: e.target.value as ToolCommandType }))}
-                  className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 text-xs font-normal"
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal"
                 >
                   <option value="http-api">http-api</option>
                   <option value="manual">manual</option>
@@ -448,15 +538,168 @@ export function ToolManagerModal({ open, tools, loadError, onClose, onChanged }:
               </label>
 
               <label className="text-xs font-semibold text-slate-700">
-                Endpoint / Command (ไม่บังคับ)
-                <input
-                  type="text"
-                  value={form.endpoint}
-                  onChange={(e) => setForm((prev) => ({ ...prev, endpoint: e.target.value }))}
-                  placeholder="https://api.example.com/v1"
-                  className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 text-xs font-normal"
-                />
+                HTTP Method
+                <select
+                  value={form.http_method}
+                  onChange={(e) => setForm((prev) => ({ ...prev, http_method: e.target.value as HTTPMethod }))}
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal"
+                >
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                </select>
               </label>
+
+              <label className="text-xs font-semibold text-slate-700">
+                Default Payload
+                <select
+                  value={form.payload_mode}
+                  onChange={(e) => setForm((prev) => ({ ...prev, payload_mode: e.target.value as PayloadMode }))}
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal"
+                >
+                  <option value="dynamic">Dynamic</option>
+                  <option value="fixed">Fixed</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="text-xs font-semibold text-slate-700">
+              <div className="flex items-center justify-between">
+                <label htmlFor="tool-endpoint-input">Endpoint URL (รองรับ {'{{param}}'} เช่น /ip/{'{{ip}}'})</label>
+                <button
+                  type="button"
+                  onClick={handleSyncParamsFromUrl}
+                  className="text-[11px] font-medium text-blue-600 hover:underline"
+                >
+                  + ดึงจาก URL
+                </button>
+              </div>
+              <input
+                id="tool-endpoint-input"
+                type="text"
+                value={form.endpoint}
+                onChange={(e) => setForm((prev) => ({ ...prev, endpoint: e.target.value }))}
+                placeholder="https://api.example.com/v1/ip/{{ip}}"
+                className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono text-xs font-normal"
+              />
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800">
+                  URL & Input Parameters ({form.params.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm((prev) => ({
+                      ...prev,
+                      params: [
+                        ...prev.params,
+                        { key: '', in: 'query', mode: prev.payload_mode, value: '', required: false },
+                      ],
+                    }))
+                  }
+                  className="rounded bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-slate-900"
+                >
+                  + เพิ่ม Parameter
+                </button>
+              </div>
+
+              {form.params.map((p, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-1 items-center bg-white p-1.5 rounded border border-slate-200">
+                  <input
+                    type="text"
+                    value={p.key}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        params: prev.params.map((item, i) => (i === idx ? { ...item, key: e.target.value } : item)),
+                      }))
+                    }
+                    placeholder="key"
+                    className="col-span-3 rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px]"
+                  />
+                  <select
+                    value={p.in}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        params: prev.params.map((item, i) =>
+                          i === idx ? { ...item, in: e.target.value as ParamLocation } : item
+                        ),
+                      }))
+                    }
+                    className="col-span-2 rounded border border-slate-300 px-1 py-1 text-[11px]"
+                  >
+                    <option value="path">path</option>
+                    <option value="query">query</option>
+                    <option value="body">body</option>
+                    <option value="header">header</option>
+                  </select>
+                  <select
+                    value={p.mode}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        params: prev.params.map((item, i) =>
+                          i === idx ? { ...item, mode: e.target.value as PayloadMode } : item
+                        ),
+                      }))
+                    }
+                    className="col-span-2 rounded border border-slate-300 px-1 py-1 text-[11px]"
+                  >
+                    <option value="dynamic">dyn</option>
+                    <option value="fixed">fixed</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={p.value || ''}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        params: prev.params.map((item, i) => (i === idx ? { ...item, value: e.target.value } : item)),
+                      }))
+                    }
+                    placeholder={p.mode === 'fixed' ? 'value' : '{{alert.src_ip}}'}
+                    className="col-span-3 rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px]"
+                  />
+                  <label className="col-span-1 flex items-center justify-center text-[10px]" title="Required">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(p.required)}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          params: prev.params.map((item, i) =>
+                            i === idx ? { ...item, required: e.target.checked } : item
+                          ),
+                        }))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setForm((prev) => ({
+                        ...prev,
+                        params: prev.params.filter((_, i) => i !== idx),
+                      }))
+                    }
+                    className="col-span-1 text-center text-xs font-bold text-rose-500 hover:text-rose-700"
+                    title="ลบ Parameter"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+
+              {urlPreview && (
+                <div className="rounded bg-slate-900 px-2 py-1 font-mono text-[10px] text-sky-300 break-all">
+                  {urlPreview}
+                </div>
+              )}
             </div>
 
             <div className="text-xs font-semibold text-slate-700">

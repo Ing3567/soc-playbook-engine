@@ -12,10 +12,19 @@ import {
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
-import type { FlowNode, FlowEdge, PlaybookItem, RunStatus, ExecutionLog, ToolDefinition } from './types'
+import type {
+  FlowNode,
+  FlowEdge,
+  PlaybookItem,
+  RunStatus,
+  ExecutionLog,
+  ToolDefinition,
+  PayloadMode,
+} from './types'
 import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
 import { FlowNodeCard } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
+import { LookupPayloadModal } from './LookupPayloadModal'
 
 const nodeTypes = { socNode: FlowNodeCard }
 
@@ -35,28 +44,31 @@ function buildGraphLayout(
   statuses: Record<string, RunStatus>,
   availableTools: ToolDefinition[],
   onRunNode: (id: string) => void,
-  onChangeTool: (id: string, nextTool: string) => void
+  onChangeTool: (id: string, nextTool: string) => void,
+  onEditPayload: (id: string) => void
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 })
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 90 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: 240, height: 116 }))
+  nodes.forEach((n) => g.setNode(n.id, { width: 256, height: n.type === 'lookup' ? 136 : 116 }))
   edges.forEach((e) => g.setEdge(e.source, e.target))
   dagre.layout(g)
 
   const rfNodes: RFNode[] = nodes.map((n) => {
     const pos = g.node(n.id)
+    const h = n.type === 'lookup' ? 136 : 116
     return {
       id: n.id,
       type: 'socNode',
-      position: { x: (pos?.x ?? 0) - 120, y: (pos?.y ?? 0) - 58 },
+      position: { x: (pos?.x ?? 0) - 128, y: (pos?.y ?? 0) - h / 2 },
       data: {
         ...n,
         status: statuses[n.id] || 'idle',
         availableTools,
         onRun: () => onRunNode(n.id),
         onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
+        onEditPayload: () => onEditPayload(n.id),
       },
     }
   })
@@ -85,6 +97,13 @@ export default function App() {
   const [tools, setTools] = useState<ToolDefinition[]>([])
   const [toolsLoadError, setToolsLoadError] = useState('')
   const [toolModalOpen, setToolModalOpen] = useState(false)
+  const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
+  const [alertContext, setAlertContext] = useState({
+    src_ip: '198.51.100.42',
+    domain: 'malicious.example.com',
+    file_hash: '44d88612fea8a8f36de82e1278abb02f',
+    username: 'jdoe',
+  })
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
@@ -97,6 +116,8 @@ export default function App() {
   nodesRef.current = nodes
   const toolsRef = useRef<ToolDefinition[]>([])
   toolsRef.current = tools
+  const alertContextRef = useRef(alertContext)
+  alertContextRef.current = alertContext
   const skipNextLayoutRef = useRef(false)
 
   const reloadPlaybooks = useCallback(async () => {
@@ -121,12 +142,52 @@ export default function App() {
   const changeNodeTool = useCallback(
     (nodeId: string, nextTool: string) => {
       skipNextLayoutRef.current = true
+      const matched = toolsRef.current.find((t) => t.id === nextTool)
+      const nextMode: PayloadMode | undefined = matched?.payload_mode || (matched?.params?.length ? 'dynamic' : undefined)
+      const nextPayload: Record<string, string> | undefined = matched?.params?.length
+        ? Object.fromEntries(
+            matched.params.map((p) => [p.key, p.value || p.default_value || ''])
+          )
+        : undefined
+
       setNodes((prev) =>
-        prev.map((n) => (n.id === nodeId ? { ...n, tool: nextTool, tool_source: 'manual' } : n))
+        prev.map((n) =>
+          n.id === nodeId
+            ? { ...n, tool: nextTool, tool_source: 'manual', payload_mode: nextMode, input_payload: nextPayload }
+            : n
+        )
       )
       setRfNodes((prev) =>
         prev.map((n) =>
-          n.id === nodeId ? { ...n, data: { ...n.data, tool: nextTool, tool_source: 'manual' } } : n
+          n.id === nodeId
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  tool: nextTool,
+                  tool_source: 'manual',
+                  payload_mode: nextMode,
+                  input_payload: nextPayload,
+                },
+              }
+            : n
+        )
+      )
+    },
+    [setRfNodes]
+  )
+
+  const updateNodePayload = useCallback(
+    (nodeId: string, payloadMode: PayloadMode, inputPayload: Record<string, string>) => {
+      skipNextLayoutRef.current = true
+      setNodes((prev) =>
+        prev.map((n) => (n.id === nodeId ? { ...n, payload_mode: payloadMode, input_payload: inputPayload } : n))
+      )
+      setRfNodes((prev) =>
+        prev.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, payload_mode: payloadMode, input_payload: inputPayload } }
+            : n
         )
       )
     },
@@ -134,12 +195,19 @@ export default function App() {
   )
 
   const runNode = useCallback(
-    async (nodeId: string): Promise<{ ok: boolean; output: Record<string, unknown> | null }> => {
+    async (
+      nodeId: string,
+      extraContext?: Record<string, unknown>
+    ): Promise<{ ok: boolean; output: Record<string, unknown> | null }> => {
       const target = nodesRef.current.find((n) => n.id === nodeId)
       if (!target) return { ok: false, output: null }
       setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
+      const runtimeCtx: Record<string, unknown> = {
+        alert: alertContextRef.current,
+        ...extraContext,
+      }
       try {
-        const res = await executeStep(target)
+        const res = await executeStep(target, runtimeCtx)
         const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
         setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
         setLogs((prev) => [
@@ -189,7 +257,8 @@ export default function App() {
       {},
       toolsRef.current,
       runNode,
-      changeNodeTool
+      changeNodeTool,
+      (id) => setEditingPayloadNodeId(id)
     )
     setRfNodes(nextN)
     setRfEdges(nextE)
@@ -290,6 +359,7 @@ export default function App() {
 
     const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
     const visited = new Set<string>()
+    const nodeOutputs: Record<string, unknown> = {}
     let current: FlowNode | undefined = startNode
     let lastOutput: Record<string, unknown> | null = null
 
@@ -298,9 +368,15 @@ export default function App() {
       const outEdges = outgoing.get(current.id) ?? []
 
       if (current.type === 'lookup' || current.type === 'action') {
-        const res = await runNode(current.id)
+        const res = await runNode(current.id, {
+          prev: lastOutput ?? {},
+          nodes: nodeOutputs,
+        })
         if (!res.ok) break
         lastOutput = res.output
+        if (res.output) {
+          nodeOutputs[current.id] = res.output
+        }
       } else if (current.type === 'end') {
         break
       }
@@ -439,6 +515,52 @@ export default function App() {
         </div>
 
         <div className="border-t pt-2">
+          <details className="text-xs">
+            <summary className="cursor-pointer font-bold text-slate-700">
+              Dynamic Payload Context (Test Inputs)
+            </summary>
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              <label className="text-[10px] font-semibold text-slate-600">
+                alert.src_ip
+                <input
+                  type="text"
+                  value={alertContext.src_ip}
+                  onChange={(e) => setAlertContext((p) => ({ ...p, src_ip: e.target.value }))}
+                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
+                />
+              </label>
+              <label className="text-[10px] font-semibold text-slate-600">
+                alert.domain
+                <input
+                  type="text"
+                  value={alertContext.domain}
+                  onChange={(e) => setAlertContext((p) => ({ ...p, domain: e.target.value }))}
+                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
+                />
+              </label>
+              <label className="text-[10px] font-semibold text-slate-600">
+                alert.file_hash
+                <input
+                  type="text"
+                  value={alertContext.file_hash}
+                  onChange={(e) => setAlertContext((p) => ({ ...p, file_hash: e.target.value }))}
+                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
+                />
+              </label>
+              <label className="text-[10px] font-semibold text-slate-600">
+                alert.username
+                <input
+                  type="text"
+                  value={alertContext.username}
+                  onChange={(e) => setAlertContext((p) => ({ ...p, username: e.target.value }))}
+                  className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 font-mono text-[11px] font-normal"
+                />
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <div className="border-t pt-2">
           <div className="text-xs font-bold mb-1">รายการที่บันทึกไว้ ({savedList.length})</div>
           <div className="space-y-1 max-h-40 overflow-y-auto">
             {savedList.map((item) => (
@@ -518,6 +640,14 @@ export default function App() {
         loadError={toolsLoadError}
         onClose={() => setToolModalOpen(false)}
         onChanged={reloadTools}
+      />
+
+      <LookupPayloadModal
+        node={nodes.find((n) => n.id === editingPayloadNodeId) ?? null}
+        tool={tools.find((t) => t.id === nodes.find((n) => n.id === editingPayloadNodeId)?.tool)}
+        runtimeContext={{ alert: alertContext }}
+        onClose={() => setEditingPayloadNodeId(null)}
+        onSave={updateNodePayload}
       />
     </div>
   )
