@@ -316,3 +316,38 @@ func TestLookupNodeInheritsInputPayloadAndSandboxResolvesURL(t *testing.T) {
 		t.Fatalf("expected missing required dynamic param to fail, got %q", failMissing.Status)
 	}
 }
+
+func TestToolAutoDescriptionAndDryRun(t *testing.T) {
+	norm, err := NormalizeAndValidateTool(ToolDefinition{
+		Name:       "Shodan Host",
+		Category:   "lookup",
+		HTTPMethod: "GET",
+		Endpoint:   "https://api.shodan.io/shodan/host/{{ip}}",
+		Params: []ToolParameter{
+			{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			{Key: "minify", In: "query", Mode: "fixed", Value: "true"},
+		},
+		MockOutput: map[string]any{"ports": []int{22, 80}},
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if norm.Description == "" {
+		t.Fatalf("expected auto-generated description when omitted")
+	}
+
+	execReq := ExecutionRequest{
+		NodeID:         "dry_run",
+		Type:           norm.Category,
+		Label:          "Dry Run: " + norm.Name,
+		Tool:           norm.ID,
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "1.2.3.4"}},
+	}
+	res := RunSandboxStep(execReq, &norm)
+	if res.Status != "success" {
+		t.Fatalf("expected dry run success, got %q (%v)", res.Status, res.Output)
+	}
+	if res.Output["resolved_url"] != "https://api.shodan.io/shodan/host/1.2.3.4?minify=true" {
+		t.Fatalf("unexpected dry run resolved_url: %v", res.Output["resolved_url"])
+	}
+}
