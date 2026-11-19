@@ -1,4 +1,7 @@
 export type ToolSource = 'ai' | 'keyword' | 'manual'
+export type ParamLocation = 'path' | 'query' | 'body' | 'header'
+export type PayloadMode = 'fixed' | 'dynamic'
+export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
 
 export interface FlowNode {
   id: string
@@ -6,6 +9,8 @@ export interface FlowNode {
   label: string
   tool: string
   tool_source?: ToolSource
+  payload_mode?: PayloadMode
+  input_payload?: Record<string, string>
 }
 
 export interface FlowEdge {
@@ -39,6 +44,16 @@ export interface ExecutionLog {
 export type ToolCategory = 'lookup' | 'action'
 export type ToolCommandType = 'http-api' | 'manual' | 'bash' | 'ssh'
 
+export interface ToolParameter {
+  key: string
+  label?: string
+  in: ParamLocation
+  mode: PayloadMode
+  value?: string
+  default_value?: string
+  required?: boolean
+}
+
 export interface ToolDefinition {
   id: string
   name: string
@@ -46,7 +61,11 @@ export interface ToolDefinition {
   description: string
   keywords: string[]
   command_type: ToolCommandType
+  http_method?: HTTPMethod
   endpoint?: string
+  payload_mode?: PayloadMode
+  params?: ToolParameter[]
+  payload_template?: Record<string, unknown>
   mock_output?: Record<string, unknown>
   is_builtin: boolean
   enabled: boolean

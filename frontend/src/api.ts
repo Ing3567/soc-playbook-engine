@@ -99,7 +99,7 @@ export async function deleteTool(id: string) {
   }
 }
 
-export async function executeStep(node: FlowNode) {
+export async function executeStep(node: FlowNode, runtimeContext?: Record<string, unknown>) {
   const res = await fetch('/api/execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -108,6 +108,9 @@ export async function executeStep(node: FlowNode) {
       type: node.type,
       label: node.label,
       tool: node.tool,
+      payload_mode: node.payload_mode,
+      input_payload: node.input_payload,
+      runtime_context: runtimeContext,
     }),
   })
   const data = await parseJsonSafe<{
