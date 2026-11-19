@@ -256,6 +256,8 @@ func (h *ApiHandler) SavePlaybook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูลไม่ถูกต้อง"})
 		return
 	}
+	toolMap := h.loadToolMap(c.Request.Context())
+	doc = SanitizePlaybookForSave(doc, toolMap)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 	saved, err := h.repo.SaveOne(ctx, doc)

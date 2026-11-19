@@ -234,3 +234,68 @@ func NormalizeAndValidateTool(tool ToolDefinition, isCreate bool) (ToolDefinitio
 
 	return tool, nil
 }
+
+// SanitizePlaybookForSave ensures SOP blueprints persist only fixed parameters and
+// template expressions (e.g. {{alert.src_ip}}, {{prev.verdict}}), never raw runtime customer inputs.
+func SanitizePlaybookForSave(doc PlaybookDocument, toolMap map[string]ToolDefinition) PlaybookDocument {
+	if len(doc.Nodes) == 0 {
+		return doc
+	}
+	sanitizedNodes := make([]Node, len(doc.Nodes))
+	for i, n := range doc.Nodes {
+		copyNode := n
+		toolDef, hasTool := toolMap[n.Tool]
+
+		if len(n.ParamModes) > 0 {
+			modes := make(map[string]string, len(n.ParamModes))
+			for k, m := range n.ParamModes {
+				lm := strings.ToLower(strings.TrimSpace(m))
+				if lm == "fixed" || lm == "dynamic" {
+					modes[k] = lm
+				}
+			}
+			if len(modes) > 0 {
+				copyNode.ParamModes = modes
+			} else {
+				copyNode.ParamModes = nil
+			}
+		}
+
+		if len(n.InputPayload) > 0 {
+			cleanedPayload := make(map[string]string)
+			for k, v := range n.InputPayload {
+				mode := ""
+				if copyNode.ParamModes != nil {
+					mode = copyNode.ParamModes[k]
+				}
+				if mode == "" && hasTool {
+					for _, p := range toolDef.Params {
+						if p.Key == k {
+							mode = p.Mode
+							break
+						}
+					}
+				}
+				if mode == "" {
+					mode = strings.ToLower(strings.TrimSpace(n.PayloadMode))
+				}
+				if mode == "" {
+					mode = "dynamic"
+				}
+				isTemplate := strings.Contains(v, "{{") && strings.Contains(v, "}}")
+				if mode == "fixed" || isTemplate {
+					cleanedPayload[k] = v
+				}
+			}
+			if len(cleanedPayload) > 0 {
+				copyNode.InputPayload = cleanedPayload
+			} else {
+				copyNode.InputPayload = nil
+			}
+		}
+
+		sanitizedNodes[i] = copyNode
+	}
+	doc.Nodes = sanitizedNodes
+	return doc
+}

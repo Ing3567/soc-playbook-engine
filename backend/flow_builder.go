@@ -136,13 +136,29 @@ func (g *graphState) appendNode(nodeType, label, tool, toolSource string) string
 			node.PayloadMode = "dynamic"
 		}
 		if len(toolDef.Params) > 0 {
+			node.ParamModes = make(map[string]string, len(toolDef.Params))
 			node.InputPayload = make(map[string]string, len(toolDef.Params))
 			for _, p := range toolDef.Params {
-				if p.Value != "" {
-					node.InputPayload[p.Key] = p.Value
-				} else if p.DefaultValue != "" {
-					node.InputPayload[p.Key] = p.DefaultValue
+				pMode := p.Mode
+				if pMode == "" {
+					pMode = node.PayloadMode
 				}
+				if pMode == "" {
+					pMode = "dynamic"
+				}
+				node.ParamModes[p.Key] = pMode
+				val := p.Value
+				if val == "" {
+					val = p.DefaultValue
+				}
+				if pMode == "fixed" || (strings.Contains(val, "{{") && strings.Contains(val, "}}")) {
+					if val != "" {
+						node.InputPayload[p.Key] = val
+					}
+				}
+			}
+			if len(node.InputPayload) == 0 {
+				node.InputPayload = nil
 			}
 		}
 	}
