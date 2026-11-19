@@ -145,17 +145,23 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 			}
 
 			paramMode := effectiveMode
-			if req.PayloadMode == "" && (p.Mode == "fixed" || p.Mode == "dynamic") {
+			if m, ok := req.ParamModes[p.Key]; ok && (m == "fixed" || m == "dynamic") {
+				paramMode = m
+			} else if req.PayloadMode == "" && (p.Mode == "fixed" || p.Mode == "dynamic") {
 				paramMode = p.Mode
 			}
 
 			val := rawVal
 			var unresolved []string
 			if paramMode == "dynamic" {
-				val, unresolved = ResolveDynamicValue(rawVal, req.RuntimeContext)
-				if strings.TrimSpace(val) == "" && p.DefaultValue != "" {
-					val = p.DefaultValue
-					unresolved = nil
+				if rtVal, hasRT := req.RuntimeInputs[p.Key]; hasRT && strings.TrimSpace(rtVal) != "" {
+					val = strings.TrimSpace(rtVal)
+				} else {
+					val, unresolved = ResolveDynamicValue(rawVal, req.RuntimeContext)
+					if strings.TrimSpace(val) == "" && p.DefaultValue != "" {
+						val = p.DefaultValue
+						unresolved = nil
+					}
 				}
 			} else if strings.TrimSpace(val) == "" && p.DefaultValue != "" {
 				val = p.DefaultValue
@@ -183,7 +189,22 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		}
 	}
 
-	// Include any ad-hoc input_payload keys not explicitly listed in tool.Params.
+	// Include any ad-hoc runtime_inputs or input_payload keys not explicitly listed in tool.Params.
+	for k, v := range req.RuntimeInputs {
+		if _, exists := resolvedParams[k]; exists || strings.TrimSpace(v) == "" {
+			continue
+		}
+		val := strings.TrimSpace(v)
+		resolvedParams[k] = val
+		if strings.Contains(endpoint, "{{"+k+"}}") {
+			pathValues[k] = val
+		} else if method == "GET" || method == "DELETE" {
+			queryPairs[k] = val
+		} else {
+			body[k] = val
+		}
+	}
+
 	for k, v := range req.InputPayload {
 		if _, exists := resolvedParams[k]; exists {
 			continue

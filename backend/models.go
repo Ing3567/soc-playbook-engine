@@ -26,6 +26,7 @@ type Node struct {
 	Tool         string            `json:"tool" bson:"tool"`
 	ToolSource   string            `json:"tool_source,omitempty" bson:"tool_source,omitempty"`
 	PayloadMode  string            `json:"payload_mode,omitempty" bson:"payload_mode,omitempty"`
+	ParamModes   map[string]string `json:"param_modes,omitempty" bson:"param_modes,omitempty"`
 	InputPayload map[string]string `json:"input_payload,omitempty" bson:"input_payload,omitempty"`
 }
 
@@ -52,7 +53,9 @@ type ExecutionRequest struct {
 	Label          string            `json:"label"`
 	Tool           string            `json:"tool"`
 	PayloadMode    string            `json:"payload_mode,omitempty"`
+	ParamModes     map[string]string `json:"param_modes,omitempty"`
 	InputPayload   map[string]string `json:"input_payload,omitempty"`
+	RuntimeInputs  map[string]string `json:"runtime_inputs,omitempty"`
 	RuntimeContext map[string]any    `json:"runtime_context,omitempty"`
 }
 
