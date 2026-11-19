@@ -99,6 +99,39 @@ export async function deleteTool(id: string) {
   }
 }
 
+export interface ToolTestResponse {
+  request: {
+    method: string
+    url: string
+    payload_mode: string
+    params?: Record<string, string>
+    headers?: Record<string, string>
+    body?: Record<string, unknown>
+    missing_required?: string[]
+  }
+  result: {
+    node_id: string
+    status: string
+    duration_ms: number
+    timestamp: string
+    output: Record<string, unknown>
+  }
+}
+
+export async function testToolDraft(
+  tool: ToolPayload,
+  runtimeContext?: Record<string, unknown>
+): Promise<ToolTestResponse> {
+  const res = await fetch('/api/tools/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tool, runtime_context: runtimeContext }),
+  })
+  const data = await parseJsonSafe<ToolTestResponse & { error?: string }>(res)
+  if (!res.ok || !data) throw new Error(data?.error || `ทดสอบ Tool ไม่สำเร็จ (HTTP ${res.status})`)
+  return data
+}
+
 export async function executeStep(node: FlowNode, runtimeContext?: Record<string, unknown>) {
   const res = await fetch('/api/execute', {
     method: 'POST',
