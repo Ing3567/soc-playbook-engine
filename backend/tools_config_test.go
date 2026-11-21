@@ -198,3 +198,162 @@ func TestSubstituteEndpointVarsPathEscaping(t *testing.T) {
 	}
 }
 
+func TestVirusTotalSmartRoutingAndUIBeforeEnvPriority(t *testing.T) {
+	var seenPaths []string
+	var seenKeys []string
+
+	vtServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPaths = append(seenPaths, r.URL.Path)
+		seenKeys = append(seenKeys, r.Header.Get("x-apikey"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"ok","type":"ip_address","attributes":{"country":"US","as_owner":"Cloudflare","last_analysis_stats":{"malicious":2,"suspicious":0,"harmless":80}}}}`))
+	}))
+	defer vtServer.Close()
+
+	t.Setenv("VT_BASE_URL", vtServer.URL)
+	t.Setenv("VT_API_KEY", "env-vt-key-fallback")
+
+	// 1. UI API key takes priority over .env key for IP lookup
+	resIP := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n1",
+		Type:   "lookup",
+		Label:  "ตรวจสอบบน VirusTotal",
+		Tool:   "virustotal",
+		Inputs: map[string]string{
+			"target":  "8.8.8.8",
+			"api_key": "ui-vt-key-priority",
+		},
+	})
+	if resIP.Status != "success" || resIP.Mode != "real" {
+		t.Fatalf("expected VT real IP success, got status=%s mode=%s err=%s", resIP.Status, resIP.Mode, resIP.Error)
+	}
+
+	// 2. Empty UI API key falls back to .env key for Domain lookup
+	resDomain := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n2",
+		Type:   "lookup",
+		Label:  "ตรวจสอบโดเมนบน VirusTotal",
+		Tool:   "virustotal",
+		Inputs: map[string]string{"target": "malicious.example.com"},
+	})
+	if resDomain.Status != "success" || resDomain.Mode != "real" {
+		t.Fatalf("expected VT real domain success, got status=%s mode=%s err=%s", resDomain.Status, resDomain.Mode, resDomain.Error)
+	}
+
+	// 3. SHA256 hash routes to /files/{hash}
+	sha := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	resHash := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n3",
+		Type:   "lookup",
+		Label:  "ตรวจสอบ Hash บน VirusTotal",
+		Tool:   "virustotal",
+		Inputs: map[string]string{"target": sha},
+	})
+	if resHash.Status != "success" || resHash.Mode != "real" {
+		t.Fatalf("expected VT real hash success, got status=%s mode=%s err=%s", resHash.Status, resHash.Mode, resHash.Error)
+	}
+
+	if len(seenPaths) != 3 || seenPaths[0] != "/ip_addresses/8.8.8.8" || seenPaths[1] != "/domains/malicious.example.com" || seenPaths[2] != "/files/"+sha {
+		t.Errorf("unexpected VT smart routes: %v", seenPaths)
+	}
+	if len(seenKeys) != 3 || seenKeys[0] != "ui-vt-key-priority" || seenKeys[1] != "env-vt-key-fallback" {
+		t.Errorf("expected UI key priority then .env fallback, got %v", seenKeys)
+	}
+}
+
+func TestShodanSmartRoutingAndSecretRedaction(t *testing.T) {
+	if got := MatchToolByKeywords("lookup", "ค้นหาพอร์ตที่เปิดบน Shodan"); got != "shodan" {
+		t.Fatalf("expected shodan tool match, got %q", got)
+	}
+	if got := inferStepType("ค้นหา Shodan"); got != "lookup" {
+		t.Fatalf("expected lookup step type for Shodan, got %q", got)
+	}
+
+	const uiShodanKey = "shodan-ui-secret-key-888"
+	var seenRequests []string
+
+	shodanServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenRequests = append(seenRequests, r.URL.Path+"?"+r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/shodan/host/search") {
+			_, _ = w.Write([]byte(`{"total":2,"matches":[{"ip_str":"1.2.3.4","port":22,"org":"TestNet"}]}`))
+			return
+		}
+		if r.URL.Path == "/shodan/host/9.9.9.9" {
+			http.Error(w, "invalid key: "+uiShodanKey, http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ip_str":"8.8.8.8","org":"Google LLC","country_name":"United States","ports":[53,443]}`))
+	}))
+	defer shodanServer.Close()
+
+	t.Setenv("SHODAN_BASE_URL", shodanServer.URL)
+	t.Setenv("SHODAN_API_KEY", "")
+
+	// 1. Shodan IP lookup using UI API key directly (with empty .env!)
+	resIP := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n1",
+		Type:   "lookup",
+		Label:  "ตรวจสอบ IP บน Shodan",
+		Tool:   "shodan",
+		Inputs: map[string]string{
+			"query":   "8.8.8.8",
+			"api_key": uiShodanKey,
+		},
+	})
+	if resIP.Status != "success" || resIP.Mode != "real" {
+		t.Fatalf("expected Shodan real IP lookup success, got status=%s mode=%s err=%s", resIP.Status, resIP.Mode, resIP.Error)
+	}
+	if resIP.Output["org"] != "Google LLC" {
+		t.Errorf("unexpected Shodan host output: %+v", resIP.Output)
+	}
+
+	// 2. Shodan query search
+	resSearch := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n2",
+		Type:   "lookup",
+		Label:  "ค้นหา Shodan",
+		Tool:   "shodan",
+		Inputs: map[string]string{
+			"query":   "port:22",
+			"api_key": uiShodanKey,
+		},
+	})
+	if resSearch.Status != "success" || resSearch.Mode != "real" {
+		t.Fatalf("expected Shodan search success, got status=%s mode=%s err=%s", resSearch.Status, resSearch.Mode, resSearch.Error)
+	}
+
+	// 3. Error echoing the UI key MUST be redacted
+	resErr := ExecuteToolStep(context.Background(), ExecutionRequest{
+		NodeID: "n3",
+		Type:   "lookup",
+		Label:  "ตรวจสอบ Shodan",
+		Tool:   "shodan",
+		Inputs: map[string]string{
+			"query":   "9.9.9.9",
+			"api_key": uiShodanKey,
+		},
+	})
+	if resErr.Status != "failed" {
+		t.Fatalf("expected failed status for 401 response, got %s", resErr.Status)
+	}
+	if strings.Contains(resErr.Error, uiShodanKey) {
+		t.Errorf("UI API key leaked into error message: %s", resErr.Error)
+	}
+	if !strings.Contains(resErr.Error, "***REDACTED***") {
+		t.Errorf("expected redacted marker in error message, got: %s", resErr.Error)
+	}
+
+	// 4. Verify ListToolStatuses includes input_fields for searchable tools
+	foundShodanFields := false
+	for _, s := range ListToolStatuses() {
+		if s.ID == "shodan" && len(s.InputFields) == 2 && s.InputFields[0].Type == "text" && s.InputFields[1].Type == "password" {
+			foundShodanFields = true
+		}
+	}
+	if !foundShodanFields {
+		t.Errorf("expected shodan to expose text + password input_fields in ListToolStatuses")
+	}
+}
+
+
