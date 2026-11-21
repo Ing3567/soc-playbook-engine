@@ -44,6 +44,18 @@ export interface ExecutionLog {
 
 export type ToolCategory = 'lookup' | 'action'
 export type ToolCommandType = 'http-api' | 'manual' | 'bash' | 'ssh'
+export type ToolAuthType = 'none' | 'api_key' | 'bearer' | 'basic'
+export type ToolAuthLocation = 'header' | 'query'
+export type ExecutionMode = 'sandbox' | 'live'
+
+export interface ToolAuth {
+  type: ToolAuthType
+  in?: ToolAuthLocation
+  key_name?: string
+  prefix?: string
+  env_var?: string
+  allow_runtime?: boolean
+}
 
 export interface ToolParameter {
   key: string
@@ -53,6 +65,7 @@ export interface ToolParameter {
   value?: string
   default_value?: string
   required?: boolean
+  is_secret?: boolean
 }
 
 export interface ToolDefinition {
@@ -65,6 +78,8 @@ export interface ToolDefinition {
   http_method?: HTTPMethod
   endpoint?: string
   payload_mode?: PayloadMode
+  auth?: ToolAuth
+  auth_configured?: boolean
   params?: ToolParameter[]
   payload_template?: Record<string, unknown>
   mock_output?: Record<string, unknown>
@@ -74,4 +89,4 @@ export interface ToolDefinition {
   updated_at: string
 }
 
-export type ToolPayload = Omit<ToolDefinition, 'is_builtin' | 'created_at' | 'updated_at'>
+export type ToolPayload = Omit<ToolDefinition, 'auth_configured' | 'is_builtin' | 'created_at' | 'updated_at'>

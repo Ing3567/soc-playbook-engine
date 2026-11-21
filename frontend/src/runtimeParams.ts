@@ -10,6 +10,7 @@ export interface NodeParamItem {
   sharedHint: string
   alertKeys: string[]
   required: boolean
+  isSecret: boolean
   isPipeTemplate: boolean
 }
 
@@ -106,6 +107,7 @@ export function getNodeParamItems(
       sharedHint,
       alertKeys,
       required: Boolean(p.required),
+      isSecret: Boolean(p.is_secret),
       isPipeTemplate,
     })
   }
@@ -128,6 +130,7 @@ export function getNodeParamItems(
       sharedHint,
       alertKeys,
       required: false,
+      isSecret: false,
       isPipeTemplate,
     })
   }
@@ -137,6 +140,39 @@ export function getNodeParamItems(
     fixedOrPipeItems: paramItems.filter((item) => item.mode === 'fixed' || item.isPipeTemplate),
     runtimeInputItems: paramItems.filter((item) => item.mode === 'dynamic' && !item.isPipeTemplate),
   }
+}
+
+export function buildNodeResolvedUrl(
+  tool: ToolDefinition | undefined,
+  paramItems: NodeParamItem[]
+): string {
+  const endpoint = tool?.endpoint?.trim() || ''
+  if (!endpoint) return ''
+
+  let url = endpoint
+  const queryPairs: Array<[string, string]> = []
+
+  for (const item of paramItems) {
+    const val =
+      item.mode === 'fixed'
+        ? item.blueprintVal.trim()
+        : item.runtimeVal.trim() || item.sharedHint.trim() || ''
+
+    if (item.location === 'PATH') {
+      if (val) {
+        url = url.replaceAll(`{{${item.key}}}`, encodeURIComponent(val))
+      }
+    } else if (item.location === 'QUERY' && val) {
+      queryPairs.push([item.key, val])
+    }
+  }
+
+  if (queryPairs.length > 0) {
+    const qs = queryPairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+    url += (url.includes('?') ? '&' : '?') + qs
+  }
+
+  return url
 }
 
 export function buildSopInputBlocks(

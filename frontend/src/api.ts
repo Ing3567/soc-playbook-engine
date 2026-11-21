@@ -1,4 +1,4 @@
-import type { FlowNode, FlowEdge, PlaybookItem, ToolDefinition, ToolPayload } from './types'
+import type { ExecutionMode, FlowNode, FlowEdge, PlaybookItem, ToolDefinition, ToolPayload } from './types'
 
 async function parseJsonSafe<T = Record<string, unknown>>(res: Response): Promise<T | null> {
   try {
@@ -99,6 +99,21 @@ export async function deleteTool(id: string) {
   }
 }
 
+export interface RuntimeConfig {
+  allow_live_execution: boolean
+}
+
+export async function getRuntimeConfig(): Promise<RuntimeConfig> {
+  try {
+    const res = await fetch('/api/config')
+    if (!res.ok) return { allow_live_execution: false }
+    const data = await parseJsonSafe<Partial<RuntimeConfig>>(res)
+    return { allow_live_execution: Boolean(data?.allow_live_execution) }
+  } catch {
+    return { allow_live_execution: false }
+  }
+}
+
 export interface ToolTestResponse {
   request: {
     method: string
@@ -107,6 +122,15 @@ export interface ToolTestResponse {
     params?: Record<string, string>
     headers?: Record<string, string>
     body?: Record<string, unknown>
+    auth?: {
+      type: string
+      in?: string
+      key_name?: string
+      env_var?: string
+      source: string
+      configured: boolean
+      masked_preview?: string
+    }
     missing_required?: string[]
   }
   result: {
@@ -135,7 +159,8 @@ export async function testToolDraft(
 export async function executeStep(
   node: FlowNode,
   runtimeContext?: Record<string, unknown>,
-  runtimeInputs?: Record<string, string>
+  runtimeInputs?: Record<string, string>,
+  options?: { runtimeAuth?: string; executionMode?: ExecutionMode }
 ) {
   const res = await fetch('/api/execute', {
     method: 'POST',
@@ -150,6 +175,8 @@ export async function executeStep(
       input_payload: node.input_payload,
       runtime_inputs: runtimeInputs,
       runtime_context: runtimeContext,
+      runtime_auth: options?.runtimeAuth || undefined,
+      execution_mode: options?.executionMode || 'sandbox',
     }),
   })
   const data = await parseJsonSafe<{

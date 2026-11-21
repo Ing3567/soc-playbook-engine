@@ -151,8 +151,13 @@ export function LookupPayloadModal({
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!node) return
+    const authKeyLower = tool?.auth?.key_name?.trim().toLowerCase() || ''
+    const secretKeys = new Set((tool?.params || []).filter((p) => p.is_secret).map((p) => p.key))
     const cleanedBlueprintValues: Record<string, string> = {}
     for (const [k, v] of Object.entries(values)) {
+      if (secretKeys.has(k) || (authKeyLower && k.toLowerCase() === authKeyLower)) {
+        continue
+      }
       const m = paramModes[k] || 'dynamic'
       const isTemplate = v.includes('{{') && v.includes('}}')
       if (m === 'fixed' || isTemplate) {
