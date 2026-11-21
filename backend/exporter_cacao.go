@@ -17,13 +17,20 @@ type CacaoPlaybook struct {
 	Workflow      map[string]CacaoStepItem `json:"workflow"`
 }
 
+type CacaoExternalReference struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Description string `json:"description,omitempty"`
+}
+
 type CacaoStepItem struct {
-	Type         string            `json:"type"`
-	Name         string            `json:"name"`
-	OnCompletion string            `json:"on_completion,omitempty"`
-	Condition    string            `json:"condition,omitempty"`
-	Cases        map[string]string `json:"cases,omitempty"`
-	Commands     []CacaoCommand    `json:"commands,omitempty"`
+	Type               string                   `json:"type"`
+	Name               string                   `json:"name"`
+	OnCompletion       string                   `json:"on_completion,omitempty"`
+	Condition          string                   `json:"condition,omitempty"`
+	Cases              map[string]string        `json:"cases,omitempty"`
+	Commands           []CacaoCommand           `json:"commands,omitempty"`
+	ExternalReferences []CacaoExternalReference `json:"external_references,omitempty"`
 }
 
 type CacaoCommand struct {
@@ -76,6 +83,26 @@ func BuildCacaoJSON(title string, nodes []Node, edges []Edge) ([]byte, error) {
 				item.OnCompletion = "step--" + outs[0].Target
 			}
 		}
+
+		for _, l := range n.Links {
+			item.ExternalReferences = append(item.ExternalReferences, CacaoExternalReference{
+				Name:        l.Label,
+				URL:         l.URL,
+				Description: l.SplunkQuery,
+			})
+		}
+		for _, img := range n.Images {
+			name := img.Caption
+			if name == "" {
+				name = img.Filename
+			}
+			item.ExternalReferences = append(item.ExternalReferences, CacaoExternalReference{
+				Name:        name,
+				URL:         img.URL,
+				Description: img.ContentType,
+			})
+		}
+
 		workflow[stepID] = item
 	}
 

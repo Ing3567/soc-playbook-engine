@@ -6,8 +6,9 @@ import (
 )
 
 type graphState struct {
-	nodes []Node
-	edges []Edge
+	nodes    []Node
+	edges    []Edge
+	registry *URLRegistry
 }
 
 var supportedNodeTypes = map[string]bool{
@@ -41,13 +42,36 @@ func MatchToolByKeywords(nodeType, label string) string {
 	}
 }
 
+func (g *graphState) activeRegistry() *URLRegistry {
+	if g.registry != nil {
+		return g.registry
+	}
+	return NewURLRegistry()
+}
+
 func (g *graphState) appendNode(nodeType, label string) string {
+	return g.appendStepNode(Step{Type: nodeType, Label: label})
+}
+
+func (g *graphState) appendStepNode(step Step) string {
+	reg := g.activeRegistry()
+	links := reg.ResolveNodeLinks(step.Links, step.Label)
+	images := reg.ResolveNodeImages(step.Images, step.Label)
+	cleanLabel := reg.CleanNodeLabel(step.Label, links, images)
+
+	toolHint := cleanLabel
+	for _, l := range links {
+		toolHint += " " + l.URL + " " + l.Label
+	}
+
 	id := fmt.Sprintf("n%d", len(g.nodes)+1)
 	g.nodes = append(g.nodes, Node{
-		ID:    id,
-		Type:  nodeType,
-		Label: label,
-		Tool:  MatchToolByKeywords(nodeType, label),
+		ID:     id,
+		Type:   step.Type,
+		Label:  cleanLabel,
+		Tool:   MatchToolByKeywords(step.Type, toolHint),
+		Links:  links,
+		Images: images,
 	})
 	return id
 }
@@ -56,21 +80,22 @@ func (g *graphState) connectNodes(fromID, toID, label string) {
 	if toID == "" {
 		return
 	}
+	cleanEdgeLabel := g.activeRegistry().StripPlaceholders(label)
 	for i := range g.edges {
 		existing := &g.edges[i]
 		if existing.Source == fromID && existing.Target == toID {
-			if label != "" {
+			if cleanEdgeLabel != "" {
 				if existing.Label == "" {
-					existing.Label = label
+					existing.Label = cleanEdgeLabel
 				} else {
-					existing.Label += " / " + label
+					existing.Label += " / " + cleanEdgeLabel
 				}
 			}
 			return
 		}
 	}
 	edgeID := fmt.Sprintf("e%d", len(g.edges)+1)
-	g.edges = append(g.edges, Edge{ID: edgeID, Source: fromID, Target: toID, Label: label})
+	g.edges = append(g.edges, Edge{ID: edgeID, Source: fromID, Target: toID, Label: cleanEdgeLabel})
 }
 
 func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
@@ -95,7 +120,23 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 		if step.Type == "decision" && len(step.Branches) == 0 {
 			step.Type = "action"
 		}
-		id := g.appendNode(step.Type, step.Label)
+		if step.Type == "decision" {
+			for bIdx := range step.Branches {
+				br := &step.Branches[bIdx]
+				urlMatches := placeholderPattern.FindAllString(br.Label, -1)
+				imgMatches := imageTokenPattern.FindAllString(br.Label, -1)
+				if len(urlMatches) > 0 || len(imgMatches) > 0 {
+					if len(br.Steps) > 0 {
+						br.Steps[0].Links = append(br.Steps[0].Links, urlMatches...)
+						br.Steps[0].Images = append(br.Steps[0].Images, imgMatches...)
+					} else {
+						step.Links = append(step.Links, urlMatches...)
+						step.Images = append(step.Images, imgMatches...)
+					}
+				}
+			}
+		}
+		id := g.appendStepNode(step)
 		switch step.Type {
 		case "decision":
 			for _, br := range step.Branches {
@@ -111,7 +152,14 @@ func (g *graphState) buildStepSequence(steps []Step, nextID string) string {
 }
 
 func BuildCustomFlowchart(steps []Step) ([]Node, []Edge) {
-	state := &graphState{}
+	return BuildCustomFlowchartWithRegistry(steps, nil)
+}
+
+func BuildCustomFlowchartWithRegistry(steps []Step, registry *URLRegistry) ([]Node, []Edge) {
+	if registry != nil {
+		steps = registry.ReconcileSteps(steps)
+	}
+	state := &graphState{registry: registry}
 	startID := state.appendNode("terminal", "เริ่ม")
 	state.connectNodes(startID, state.buildStepSequence(steps, ""), "")
 	return state.nodes, state.edges

@@ -21,6 +21,7 @@ func NewApiHandler(repo *PlaybookRepository) *ApiHandler {
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/api/generate", h.GenerateFlowchart)
+	r.GET("/api/images/:id", h.GetImage)
 	r.GET("/api/sops", h.ListPlaybooks)
 	r.POST("/api/sops", h.SavePlaybook)
 	r.DELETE("/api/sops/:id", h.DeletePlaybook)
@@ -32,20 +33,25 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 
 func (h *ApiHandler) GenerateFlowchart(c *gin.Context) {
 	fail := func(code int, msg string) { c.JSON(code, gin.H{"error": msg}) }
-	var lines []Line
+	var extractedLines []ExtractedLine
 
 	if fh, err := c.FormFile("file"); err == nil {
-		switch strings.ToLower(filepath.Ext(fh.Filename)) {
-		case ".docx":
+		ext := strings.ToLower(filepath.Ext(fh.Filename))
+		switch ext {
+		case ".docx", ".xlsx":
 		case ".doc":
 			fail(http.StatusBadRequest, "ไฟล์ .doc รุ่นเก่าไม่รองรับ กรุณา Save As เป็น .docx ก่อน")
 			return
+		case ".xls":
+			fail(http.StatusBadRequest, "ไฟล์ .xls รุ่นเก่าไม่รองรับ กรุณา Save As เป็น .xlsx ก่อน")
+			return
 		default:
-			fail(http.StatusBadRequest, "รองรับเฉพาะไฟล์ Word (.docx) เท่านั้น")
+			fail(http.StatusBadRequest, "รองรับเฉพาะไฟล์ Word (.docx) และ Excel (.xlsx) เท่านั้น")
 			return
 		}
-		if fh.Size > 10<<20 {
-			fail(http.StatusRequestEntityTooLarge, "ไฟล์ใหญ่เกิน 10MB")
+		const maxUploadSize = 25 << 20
+		if fh.Size > maxUploadSize {
+			fail(http.StatusRequestEntityTooLarge, "ไฟล์ใหญ่เกิน 25MB")
 			return
 		}
 		f, err := fh.Open()
@@ -54,30 +60,76 @@ func (h *ApiHandler) GenerateFlowchart(c *gin.Context) {
 			return
 		}
 		defer f.Close()
-		data, _ := io.ReadAll(io.LimitReader(f, 10<<20))
-		if lines, err = ExtractLinesFromDocx(data); err != nil {
-			fail(http.StatusBadRequest, "ไฟล์ไม่ใช่ Word (.docx) ที่ถูกต้อง")
+		data, readErr := io.ReadAll(io.LimitReader(f, maxUploadSize+1))
+		if readErr != nil {
+			fail(http.StatusBadRequest, "อ่านไฟล์ไม่ได้")
 			return
+		}
+		if len(data) > maxUploadSize {
+			fail(http.StatusRequestEntityTooLarge, "ไฟล์ใหญ่เกิน 25MB")
+			return
+		}
+		if ext == ".docx" {
+			if extractedLines, err = ExtractLinesFromDocx(data); err != nil {
+				fail(http.StatusBadRequest, "ไฟล์ไม่ใช่ Word (.docx) ที่ถูกต้อง")
+				return
+			}
+		} else {
+			if extractedLines, err = ExtractLinesFromXlsx(data); err != nil {
+				fail(http.StatusBadRequest, "ไฟล์ไม่ใช่ Excel (.xlsx) ที่ถูกต้อง")
+				return
+			}
 		}
 	} else if t := strings.TrimSpace(c.PostForm("text")); t != "" {
-		if len(t) > 50000 {
-			fail(http.StatusRequestEntityTooLarge, "ข้อความยาวเกิน 50,000 ตัวอักษร")
+		if len(t) > 100000 {
+			fail(http.StatusRequestEntityTooLarge, "ข้อความยาวเกิน 100,000 ตัวอักษร")
 			return
 		}
-		lines = ExtractLinesFromText(t)
+		extractedLines = ExtractLinesFromText(t)
 	} else {
-		fail(http.StatusBadRequest, "กรุณาพิมพ์ SOP หรืออัปโหลดไฟล์ Word (.docx)")
+		fail(http.StatusBadRequest, "กรุณาพิมพ์ SOP หรืออัปโหลดไฟล์ Word (.docx) / Excel (.xlsx)")
 		return
 	}
 
-	if len(lines) == 0 {
+	if len(extractedLines) == 0 {
 		fail(http.StatusBadRequest, "ไม่พบข้อความ SOP")
 		return
 	}
 
-	steps, engine := ConvertLinesToSteps(lines)
-	nodes, edges := BuildCustomFlowchart(steps)
-	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "edges": edges, "engine": engine, "lines": lines})
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	displayLines, maskedLines, registry := PrepareLinesAndRegistry(ctx, extractedLines, h.repo)
+	if len(maskedLines) == 0 {
+		fail(http.StatusBadRequest, "ไม่พบข้อความ SOP")
+		return
+	}
+
+	steps, engine := ConvertLinesToSteps(maskedLines)
+	nodes, edges := BuildCustomFlowchartWithRegistry(steps, registry)
+	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "edges": edges, "engine": engine, "lines": displayLines})
+}
+
+func (h *ApiHandler) GetImage(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" || h.repo == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบรูปภาพ"})
+		return
+	}
+
+	data, meta, err := h.repo.GetImage(ctx, id)
+	if err != nil || len(data) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบรูปภาพ"})
+		return
+	}
+
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.Header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	c.Data(http.StatusOK, meta.ContentType, data)
 }
 
 func (h *ApiHandler) ListPlaybooks(c *gin.Context) {

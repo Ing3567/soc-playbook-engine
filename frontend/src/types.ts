@@ -1,8 +1,25 @@
+export interface NodeLink {
+  label: string
+  url: string
+  source?: string
+  splunk_query?: string
+}
+
+export interface NodeImage {
+  id: string
+  filename: string
+  content_type: string
+  url: string
+  caption?: string
+}
+
 export interface FlowNode {
   id: string
   type: string
   label: string
   tool: string
+  links?: NodeLink[]
+  images?: NodeImage[]
 }
 
 export interface FlowEdge {

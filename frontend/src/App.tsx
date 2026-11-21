@@ -12,7 +12,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
-import type { FlowNode, FlowEdge, PlaybookItem, RunStatus, ExecutionLog } from './types'
+import type { FlowNode, FlowEdge, NodeImage, PlaybookItem, RunStatus, ExecutionLog } from './types'
 import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile } from './api'
 import { FlowNodeCard } from './FlowNodeCard'
 
@@ -28,30 +28,62 @@ const SAMPLE_SOP = `ตรวจสอบ IP การเข้าระบบ�
   เฝ้าระวังพฤติกรรม 24 ชั่วโมง
 บันทึกผลลงระบบ Ticket`
 
+function estimateNodeDimensions(n: FlowNode): { width: number; height: number } {
+  const links = n.links || []
+  const images = n.images || []
+  const hasAssets = links.length > 0 || images.length > 0
+  const width = hasAssets ? 260 : 230
+
+  const extraTextLines = Math.max(0, Math.ceil((n.label || '').length / 30) - 2)
+  let height = 86 + extraTextLines * 16
+
+  if (links.length > 0) {
+    height += 12
+    for (const l of links) {
+      height += l.splunk_query ? 52 : 28
+    }
+  }
+
+  if (images.length > 0) {
+    const rows = images.length > 1 ? Math.ceil(images.length / 2) : 1
+    height += 12 + rows * 108
+  }
+
+  return { width, height }
+}
+
 function buildGraphLayout(
   nodes: FlowNode[],
   edges: FlowEdge[],
   statuses: Record<string, RunStatus>,
-  onRunNode: (id: string) => void
+  onRunNode: (id: string) => void,
+  onPreviewImage: (img: NodeImage) => void
 ) {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'TB', nodesep: 55, ranksep: 70 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: 230, height: 86 }))
+  const dimsById: Record<string, { width: number; height: number }> = {}
+  nodes.forEach((n) => {
+    const dims = estimateNodeDimensions(n)
+    dimsById[n.id] = dims
+    g.setNode(n.id, dims)
+  })
   edges.forEach((e) => g.setEdge(e.source, e.target))
   dagre.layout(g)
 
   const rfNodes: RFNode[] = nodes.map((n) => {
     const pos = g.node(n.id)
+    const dims = dimsById[n.id] || { width: 230, height: 86 }
     return {
       id: n.id,
       type: 'socNode',
-      position: { x: (pos?.x ?? 0) - 115, y: (pos?.y ?? 0) - 43 },
+      position: { x: (pos?.x ?? 0) - dims.width / 2, y: (pos?.y ?? 0) - dims.height / 2 },
       data: {
         ...n,
         status: statuses[n.id] || 'idle',
         onRun: () => onRunNode(n.id),
+        onPreviewImage,
       },
     }
   })
@@ -81,20 +113,38 @@ export default function App() {
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [previewImage, setPreviewImage] = useState<NodeImage | null>(null)
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([])
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
 
   const nodesRef = useRef<FlowNode[]>([])
-  nodesRef.current = nodes
+  useEffect(() => {
+    nodesRef.current = nodes
+  }, [nodes])
 
   const reloadPlaybooks = useCallback(async () => {
     setSavedList(await getPlaybooks())
   }, [])
 
   useEffect(() => {
-    reloadPlaybooks()
-  }, [reloadPlaybooks])
+    let active = true
+    void getPlaybooks().then((items) => {
+      if (active) setSavedList(items)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!previewImage) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreviewImage(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [previewImage])
 
   const runNode = useCallback(async (nodeId: string) => {
     const target = nodesRef.current.find((n) => n.id === nodeId)
@@ -121,7 +171,13 @@ export default function App() {
 
   useEffect(() => {
     if (nodes.length === 0) return
-    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(nodes, edges, statuses, runNode)
+    const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(
+      nodes,
+      edges,
+      statuses,
+      runNode,
+      setPreviewImage
+    )
     setRfNodes(nextN)
     setRfEdges(nextE)
   }, [nodes, edges, statuses, runNode, setRfNodes, setRfEdges])
@@ -158,7 +214,7 @@ export default function App() {
     const form = new FormData()
     form.append('file', file)
     setSopId('')
-    const data = await submitGenerate(form, file.name.replace(/\.docx$/i, ''))
+    const data = await submitGenerate(form, file.name.replace(/\.(docx|xlsx)$/i, ''))
     if (data?.lines) {
       setText(data.lines.map((l) => '  '.repeat(l.level) + l.text).join('\n'))
     }
@@ -210,8 +266,8 @@ export default function App() {
         />
 
         <label className="flex cursor-pointer items-center justify-center rounded border-2 border-dashed border-blue-400 bg-blue-50 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100">
-          อัปโหลดไฟล์ Word (.docx)
-          <input type="file" accept=".docx,.doc" onChange={handleFileUpload} className="hidden" />
+          อัปโหลดไฟล์ Word (.docx) / Excel (.xlsx)
+          <input type="file" accept=".docx,.xlsx,.doc,.xls" onChange={handleFileUpload} className="hidden" />
         </label>
 
         <textarea
@@ -353,6 +409,55 @@ export default function App() {
           ))}
         </div>
       </main>
+
+      {previewImage && (
+        <div
+          className="no-print fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div
+            className="flex max-h-[90vh] max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+              <div className="truncate pr-4">
+                <div className="text-sm font-bold text-slate-800">
+                  {previewImage.caption || previewImage.filename || 'Image Preview'}
+                </div>
+                {previewImage.filename && previewImage.caption && previewImage.filename !== previewImage.caption && (
+                  <div className="text-[11px] text-slate-500">{previewImage.filename}</div>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {(previewImage.url.startsWith('/api/images/') || /^https?:\/\//i.test(previewImage.url)) && (
+                  <a
+                    href={previewImage.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                  >
+                    เปิดรูปเต็ม ↗
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage(null)}
+                  className="rounded bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-200"
+                >
+                  ✕ ปิด
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto bg-slate-900/5 p-4 flex items-center justify-center">
+              <img
+                src={previewImage.url}
+                alt={previewImage.caption || previewImage.filename}
+                className="max-h-[75vh] max-w-full rounded object-contain shadow"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -11,13 +11,14 @@ import (
 )
 
 const sopToTreePrompt = `You are a SOC assistant. Convert the SOP into a nested JSON tree.
-Return ONLY JSON: {"steps":[{"type":"lookup|decision|action|end","label":"short title","branches":[{"label":"condition","steps":[...]}]}]}
+Return ONLY JSON: {"steps":[{"type":"lookup|decision|action|end","label":"short title","links":["[[URL_1]]"],"images":["[[IMG_1]]"],"branches":[{"label":"condition","steps":[...]}]}]}
 Rules:
 - "branches" is used ONLY by decision. It can have 2, 3 or more branches, and branches may contain nested decisions.
 - Indentation shows nesting. "else if" / "else" lines are at the same indent as their "if" and become extra branches of the SAME decision.
 - Lines less indented that come after a decision run after the branches merge.
 - type "end" = a step that stops that path (e.g. close case). Any branch may stop anywhere.
-- lookup = check reputation / search past cases.
+- lookup = check reputation / search past cases / query SIEM or Splunk.
+- If a line contains placeholder tokens like [[URL_1]] or [[IMG_1]], keep the exact tokens in the step's "links" or "images" array (or inside "label"). Never invent or alter placeholder tokens.
 
 SOP:
 `
@@ -138,7 +139,7 @@ func inferStepType(text string) string {
 			return "end"
 		}
 	}
-	for _, kw := range []string{"virustotal", "reputation", "jira", "เคสเก่า", "ค้นหา", "ตรวจสอบ"} {
+	for _, kw := range []string{"virustotal", "reputation", "jira", "เคสเก่า", "ค้นหา", "ตรวจสอบ", "splunk", "siem"} {
 		if strings.Contains(lower, kw) {
 			return "lookup"
 		}
@@ -147,7 +148,14 @@ func inferStepType(text string) string {
 }
 
 func createSimpleStep(text string) Step {
-	return Step{Type: inferStepType(text), Label: text}
+	links := placeholderPattern.FindAllString(text, -1)
+	images := imageTokenPattern.FindAllString(text, -1)
+	return Step{
+		Type:   inferStepType(text),
+		Label:  text,
+		Links:  links,
+		Images: images,
+	}
 }
 
 func collectIndentedChildren(lines []Line, idx *int, parentLevel int) []Line {
