@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -458,3 +460,230 @@ func TestSanitizePlaybookForSaveStripsRuntimeValues(t *testing.T) {
 		t.Fatalf("expected fixed param to be preserved, got %q", sanitized.Nodes[1].InputPayload["maxResults"])
 	}
 }
+
+func TestToolAuthValidationAndNormalization(t *testing.T) {
+	if _, err := NormalizeAndValidateToolAuth(&ToolAuth{Type: "oauth99"}); err == nil {
+		t.Fatalf("expected error for invalid auth type")
+	}
+	if _, err := NormalizeAndValidateToolAuth(&ToolAuth{Type: "api_key", EnvVar: "bad-env!"}); err == nil {
+		t.Fatalf("expected error for invalid env_var format")
+	}
+	if _, err := NormalizeAndValidateToolAuth(&ToolAuth{Type: "bearer"}); err == nil {
+		t.Fatalf("expected error when neither env_var nor allow_runtime is set")
+	}
+
+	norm, err := NormalizeAndValidateToolAuth(&ToolAuth{
+		Type:         "bearer",
+		EnvVar:       "jira_api_token",
+		AllowRuntime: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if norm.In != "header" || norm.KeyName != "Authorization" || norm.Prefix != "Bearer " || norm.EnvVar != "JIRA_API_TOKEN" {
+		t.Fatalf("unexpected normalized bearer auth: %+v", norm)
+	}
+}
+
+func TestResolveToolAuthAndSecretMasking(t *testing.T) {
+	t.Setenv("TEST_VT_SECRET_KEY", "super-secret-env-key")
+
+	tool := &ToolDefinition{
+		ID:         "vt_test",
+		Name:       "VT Test",
+		Category:   "lookup",
+		HTTPMethod: "GET",
+		Endpoint:   "https://example.test/api/v3/ip/{{ip}}",
+		Auth: &ToolAuth{
+			Type:         "api_key",
+			In:           "header",
+			KeyName:      "x-apikey",
+			EnvVar:       "TEST_VT_SECRET_KEY",
+			AllowRuntime: true,
+		},
+		Params: []ToolParameter{
+			{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+			{Key: "token", In: "query", Mode: "dynamic", IsSecret: true},
+		},
+	}
+
+	// Env var takes precedence over runtime auth
+	resolvedAuth := ResolveToolAuth(tool, "runtime-fallback")
+	if resolvedAuth.Summary.Source != "env" || !resolvedAuth.Summary.Configured {
+		t.Fatalf("expected env auth source, got %+v", resolvedAuth.Summary)
+	}
+	if strings.Contains(resolvedAuth.Summary.MaskedPreview, "super-secret-env-key") {
+		t.Fatalf("masked preview leaked secret: %q", resolvedAuth.Summary.MaskedPreview)
+	}
+
+	built := BuildToolRequest(tool, ExecutionRequest{
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "1.2.3.4"}},
+		RuntimeInputs:  map[string]string{"token": "raw-secret-token-value"},
+	})
+	if built.Params["token"] != "***" {
+		t.Fatalf("expected secret param to be masked in Params, got %q", built.Params["token"])
+	}
+	if strings.Contains(built.URL, "raw-secret-token-value") {
+		t.Fatalf("expected secret query param to be masked in URL, got %q", built.URL)
+	}
+	if built.Auth == nil || built.Auth.Source != "env" {
+		t.Fatalf("expected AuthSummary on ResolvedToolRequest, got %+v", built.Auth)
+	}
+}
+
+func TestSanitizePlaybookStripsSecretParamsAndAuthHeaders(t *testing.T) {
+	toolMap := map[string]ToolDefinition{
+		"custom_api": {
+			ID: "custom_api",
+			Auth: &ToolAuth{
+				Type:         "api_key",
+				In:           "header",
+				KeyName:      "x-apikey",
+				AllowRuntime: true,
+			},
+			Params: []ToolParameter{
+				{Key: "api_secret", In: "header", Mode: "fixed", IsSecret: true},
+				{Key: "window", In: "query", Mode: "fixed"},
+			},
+		},
+	}
+	doc := PlaybookDocument{
+		ID: "pb-secret",
+		Nodes: []Node{
+			{
+				ID:         "n1",
+				Type:       "lookup",
+				Tool:       "custom_api",
+				ParamModes: map[string]string{"api_secret": "fixed", "x-apikey": "fixed", "window": "fixed"},
+				InputPayload: map[string]string{
+					"api_secret": "leak-me-not",
+					"x-apikey":   "also-leak-me-not",
+					"window":     "24h",
+				},
+			},
+		},
+	}
+	sanitized := SanitizePlaybookForSave(doc, toolMap)
+	if _, ok := sanitized.Nodes[0].InputPayload["api_secret"]; ok {
+		t.Fatalf("expected is_secret param to be stripped on save")
+	}
+	if _, ok := sanitized.Nodes[0].InputPayload["x-apikey"]; ok {
+		t.Fatalf("expected auth KeyName param to be stripped on save")
+	}
+	if sanitized.Nodes[0].InputPayload["window"] != "24h" {
+		t.Fatalf("expected normal fixed param to remain, got %v", sanitized.Nodes[0].InputPayload)
+	}
+}
+
+func TestRunLiveHTTPStepAuthInjectionAndMasking(t *testing.T) {
+	var gotHeader string
+	var gotQueryKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("x-apikey")
+		gotQueryKey = r.URL.Query().Get("apikey")
+		if gotHeader == "bad-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid key"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"verdict":"malicious","score":95}`))
+	}))
+	defer srv.Close()
+
+	prevLive := Config.AllowLiveExecution
+	defer func() { Config.AllowLiveExecution = prevLive }()
+
+	tool := &ToolDefinition{
+		ID:          "vt_live",
+		Name:        "VT Live",
+		Category:    "lookup",
+		CommandType: "http-api",
+		HTTPMethod:  "GET",
+		Endpoint:    srv.URL + "/ip/{{ip}}",
+		Auth: &ToolAuth{
+			Type:         "api_key",
+			In:           "header",
+			KeyName:      "x-apikey",
+			EnvVar:       "UNSET_TEST_KEY_FOR_LIVE",
+			AllowRuntime: true,
+		},
+		Params: []ToolParameter{
+			{Key: "ip", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
+		},
+	}
+
+	// 1. Disabled by server config
+	Config.AllowLiveExecution = false
+	resDisabled := RunLiveHTTPStep(ExecutionRequest{NodeID: "n1", Label: "check", Tool: "vt_live"}, tool)
+	if resDisabled.Status != "failed" {
+		t.Fatalf("expected failure when AllowLiveExecution=false")
+	}
+
+	// 2. Enabled, missing credential
+	Config.AllowLiveExecution = true
+	resMissing := RunLiveHTTPStep(ExecutionRequest{
+		NodeID:         "n1",
+		Label:          "check",
+		Tool:           "vt_live",
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "8.8.8.8"}},
+	}, tool)
+	if resMissing.Status != "failed" || resMissing.Output["auth_status"] != "missing" {
+		t.Fatalf("expected missing auth failure, got %+v", resMissing)
+	}
+
+	// 3. Valid runtime session key injected into header, not leaked in Output
+	resOK := RunLiveHTTPStep(ExecutionRequest{
+		NodeID:         "n1",
+		Label:          "check",
+		Tool:           "vt_live",
+		RuntimeAuth:    "secret-session-123",
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "8.8.8.8"}},
+	}, tool)
+	if resOK.Status != "success" {
+		t.Fatalf("expected live success, got %+v", resOK)
+	}
+	if gotHeader != "secret-session-123" {
+		t.Fatalf("expected header x-apikey=secret-session-123, got %q", gotHeader)
+	}
+	rawOut, _ := json.Marshal(resOK.Output)
+	if strings.Contains(string(rawOut), "secret-session-123") {
+		t.Fatalf("live output leaked secret: %s", string(rawOut))
+	}
+
+	// 4. Query-based API key injected without leaking in resolved_url
+	queryTool := *tool
+	queryTool.Auth = &ToolAuth{
+		Type:         "api_key",
+		In:           "query",
+		KeyName:      "apikey",
+		AllowRuntime: true,
+	}
+	resQuery := RunLiveHTTPStep(ExecutionRequest{
+		NodeID:         "n1",
+		Label:          "check",
+		Tool:           "vt_live",
+		RuntimeAuth:    "query-secret-999",
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "8.8.8.8"}},
+	}, &queryTool)
+	if resQuery.Status != "success" || gotQueryKey != "query-secret-999" {
+		t.Fatalf("expected query auth success, got status=%s key=%q", resQuery.Status, gotQueryKey)
+	}
+	rawQueryOut, _ := json.Marshal(resQuery.Output)
+	if strings.Contains(string(rawQueryOut), "query-secret-999") {
+		t.Fatalf("query auth output leaked secret: %s", string(rawQueryOut))
+	}
+
+	// 5. Upstream 401 returns clear auth error
+	res401 := RunLiveHTTPStep(ExecutionRequest{
+		NodeID:         "n1",
+		Label:          "check",
+		Tool:           "vt_live",
+		RuntimeAuth:    "bad-key",
+		RuntimeContext: map[string]any{"alert": map[string]any{"src_ip": "8.8.8.8"}},
+	}, tool)
+	if res401.Status != "failed" || res401.Output["http_status"] != http.StatusUnauthorized {
+		t.Fatalf("expected 401 failure, got %+v", res401)
+	}
+}
+
