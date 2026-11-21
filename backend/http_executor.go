@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,7 +16,96 @@ import (
 const liveHTTPTimeout = 10 * time.Second
 const maxLiveResponseBytes = 1 << 20 // 1 MB
 
-var liveHTTPClient = &http.Client{Timeout: liveHTTPTimeout}
+var cgnatRange = func() *net.IPNet {
+	_, ipNet, _ := net.ParseCIDR("100.64.0.0/10")
+	return ipNet
+}()
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if cgnatRange != nil && cgnatRange.Contains(ip) {
+		return true
+	}
+	return false
+}
+
+func validateLiveTargetURL(parsed *url.URL, allowedHosts []string) error {
+	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("invalid URL scheme or host (must be http:// or https://)")
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return fmt.Errorf("missing target hostname")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return fmt.Errorf("target host %q is not allowed (internal/localhost)", host)
+	}
+	if ip := net.ParseIP(host); ip != nil && isBlockedIP(ip) {
+		return fmt.Errorf("target IP %q is blocked (private/loopback/link-local)", ip.String())
+	}
+	if len(allowedHosts) > 0 {
+		matched := false
+		for _, allowed := range allowedHosts {
+			if host == strings.ToLower(strings.TrimSpace(allowed)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("target host %q is not in LIVE_ALLOWED_HOSTS", host)
+		}
+	}
+	return nil
+}
+
+func newSafeLiveHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP addresses resolved for %q", host)
+			}
+			for _, ip := range ips {
+				if isBlockedIP(ip.IP) {
+					return nil, fmt.Errorf("blocked connection to internal/private IP %s (%s)", ip.IP.String(), host)
+				}
+			}
+			// Dial the validated IP directly to prevent DNS rebinding.
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		},
+	}
+	return &http.Client{
+		Timeout:   liveHTTPTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			return validateLiveTargetURL(req.URL, Config.LiveAllowedHosts)
+		},
+	}
+}
+
+var liveHTTPClient = newSafeLiveHTTPClient()
+var validateLiveURLFunc = validateLiveTargetURL
 
 func RunLiveHTTPStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionResult {
 	start := time.Now()
@@ -84,8 +175,14 @@ func RunLiveHTTPStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionRes
 	// Build actual outbound URL with unmasked query params + auth query param if applicable.
 	actualURL := resolved.URL
 	parsedURL, err := url.Parse(actualURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
-		return fail(fmt.Sprintf("Invalid or relative endpoint URL %q (must start with http:// or https://)", actualURL), map[string]any{
+	if err != nil {
+		return fail(fmt.Sprintf("Invalid endpoint URL %q: %v", actualURL, err), map[string]any{
+			"http_method":  resolved.Method,
+			"resolved_url": resolved.URL,
+		})
+	}
+	if err := validateLiveURLFunc(parsedURL, Config.LiveAllowedHosts); err != nil {
+		return fail(fmt.Sprintf("Blocked target URL %q: %v", resolved.URL, err), map[string]any{
 			"http_method":  resolved.Method,
 			"resolved_url": resolved.URL,
 		})

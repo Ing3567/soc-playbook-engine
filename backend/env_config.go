@@ -15,6 +15,8 @@ type AppConfig struct {
 	LlmModel           string
 	HfToken            string
 	AllowLiveExecution bool
+	LiveAllowedHosts   []string
+	AllowedOrigins     []string
 }
 
 var Config AppConfig
@@ -32,7 +34,24 @@ func LoadEnvConfig() {
 		LlmModel:           getEnvOrDefault("LLM_MODEL", "qwen2.5:3b"),
 		HfToken:            getEnvOrDefault("HF_TOKEN", ""),
 		AllowLiveExecution: liveFlag == "true" || liveFlag == "1" || liveFlag == "yes",
+		LiveAllowedHosts:   parseCSVEnv("LIVE_ALLOWED_HOSTS", ""),
+		AllowedOrigins:     parseCSVEnv("ALLOWED_ORIGINS", "http://localhost:5173"),
 	}
+}
+
+func parseCSVEnv(key, fallback string) []string {
+	raw := getEnvOrDefault(key, fallback)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.ToLower(strings.TrimSpace(p)); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func readDotEnvFile(filename string) {
