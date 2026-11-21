@@ -41,12 +41,25 @@ export interface FlowEdge {
 
 export interface PlaybookItem {
   id: string
+  version?: number
   title: string
   raw_text: string
   engine: string
   nodes: FlowNode[]
   edges: FlowEdge[]
   updated_at: string
+}
+
+export interface PlaybookVersionSnapshot {
+  id: string
+  playbook_id: string
+  version: number
+  title: string
+  raw_text: string
+  engine: string
+  nodes: FlowNode[]
+  edges: FlowEdge[]
+  created_at: string
 }
 
 export type RunStatus = 'idle' | 'running' | 'success' | 'failed'
@@ -164,6 +177,7 @@ export interface SimulationRun {
   scenario_id?: string
   scenario_title?: string
   playbook_id?: string
+  playbook_version?: number
   playbook_title: string
   nodes: FlowNode[]
   edges: FlowEdge[]

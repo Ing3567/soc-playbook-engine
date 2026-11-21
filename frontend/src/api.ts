@@ -4,6 +4,7 @@ import type {
   FlowNode,
   FlowEdge,
   PlaybookItem,
+  PlaybookVersionSnapshot,
   RunEvent,
   RunScore,
   ScenarioItem,
@@ -140,6 +141,17 @@ export async function getPlaybooks(): Promise<PlaybookItem[]> {
     if (!res.ok) return []
     const data = await parseJsonSafe<unknown>(res)
     return Array.isArray(data) ? (data as PlaybookItem[]) : []
+  } catch {
+    return []
+  }
+}
+
+export async function getPlaybookVersions(playbookId: string): Promise<PlaybookVersionSnapshot[]> {
+  try {
+    const res = await authFetch(`/api/sops/${encodeURIComponent(playbookId)}/versions`)
+    if (!res.ok) return []
+    const data = await parseJsonSafe<unknown>(res)
+    return Array.isArray(data) ? (data as PlaybookVersionSnapshot[]) : []
   } catch {
     return []
   }
@@ -293,6 +305,7 @@ export async function deleteScenario(id: string): Promise<void> {
 
 export async function startSimulationRun(payload: {
   playbook_id?: string
+  playbook_version?: number
   playbook_title?: string
   scenario_id?: string
   nodes?: FlowNode[]

@@ -10,7 +10,6 @@ import {
   type Edge as RFEdge,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import dagre from '@dagrejs/dagre'
 
 import type {
   AuthUser,
@@ -48,93 +47,20 @@ import {
 } from './api'
 import { computePipelineState, formatEdgeCondition, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
 import { buildSopInputBlocks } from './runtimeParams'
+import { ACTIVE_RUN_STORAGE_KEY, SAMPLE_SOP, buildGraphLayout } from './graphLayout'
 import { FlowNodeCard, type ManualVerdict } from './FlowNodeCard'
+import { ExecutionPanel } from './ExecutionPanel'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
 import { EdgeConditionModal } from './EdgeConditionModal'
 import { AuthModal } from './AuthModal'
 import { RunDashboardModal } from './RunDashboardModal'
 
-const ACTIVE_RUN_STORAGE_KEY = 'soc_active_run_id'
-
 const nodeTypes = { socNode: FlowNodeCard }
-
-const SAMPLE_SOP = `ตรวจสอบ IP การเข้าระบบผ่านแพลตฟอร์ม VirusTotal
-ถ้าพบว่าเป็น IP อันตรายมากกว่า 10 รายการ
-  ระงับบัญชีผู้ใช้งานและบล็อก IP บน Firewall
-  เปิดเคสแจ้งเตือนไปยัง Tier 2
-ไม่เช่นนั้นถ้าพบประวัติเคสเก่าใน Jira
-  ปิดเคส
-ไม่เช่นนั้น
-  เฝ้าระวังพฤติกรรม 24 ชั่วโมง
-บันทึกผลลงระบบ Ticket`
-
-function buildGraphLayout(
-  nodes: FlowNode[],
-  edges: FlowEdge[],
-  statuses: Record<string, RunStatus>,
-  availableTools: ToolDefinition[],
-  onRunNode: (id: string) => void,
-  onManualComplete: (id: string, verdict: ManualVerdict, openedUrl?: string) => void,
-  onChangeTool: (id: string, nextTool: string) => void,
-  onEditPayload: (id: string) => void,
-  onCreateTool: (category: ToolCategory) => void,
-  onChangeRuntimeInput: (id: string, key: string, value: string) => void
-) {
-  const g = new dagre.graphlib.Graph()
-  g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 90 })
-
-  const nodeHeight = (n: FlowNode) => {
-    if (n.type === 'lookup') return 164
-    if (n.type === 'action') return 148
-    return 116
-  }
-
-  nodes.forEach((n) => g.setNode(n.id, { width: 256, height: nodeHeight(n) }))
-  edges.forEach((e) => g.setEdge(e.source, e.target))
-  dagre.layout(g)
-
-  const rfNodes: RFNode[] = nodes.map((n) => {
-    const pos = g.node(n.id)
-    const h = nodeHeight(n)
-    return {
-      id: n.id,
-      type: 'socNode',
-      position: { x: (pos?.x ?? 0) - 128, y: (pos?.y ?? 0) - h / 2 },
-      data: {
-        ...n,
-        status: statuses[n.id] || 'idle',
-        availableTools,
-        onRun: () => onRunNode(n.id),
-        onManualComplete: (verdict: ManualVerdict, openedUrl?: string) => onManualComplete(n.id, verdict, openedUrl),
-        onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
-        onEditPayload: () => onEditPayload(n.id),
-        onCreateTool: (cat: ToolCategory) => onCreateTool(cat),
-        onChangeRuntimeInput: (key: string, value: string) => onChangeRuntimeInput(n.id, key, value),
-      },
-    }
-  })
-
-  const rfEdges: RFEdge[] = edges.map((e) => {
-    const condText = formatEdgeCondition(e.condition)
-    const displayLabel = condText ? (e.label ? `${e.label} (${condText})` : condText) : e.label
-    return {
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      label: displayLabel,
-      style: { stroke: '#64748b', strokeWidth: 2 },
-      labelStyle: { fill: '#0f172a', fontWeight: 600, fontSize: 12 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b' },
-    }
-  })
-
-  return { rfNodes, rfEdges }
-}
 
 export default function App() {
   const [sopId, setSopId] = useState('')
+  const [sopVersion, setSopVersion] = useState<number>(0)
   const [title, setTitle] = useState('SOP ตรวจสอบ IP ต้องสงสัย')
   const [text, setText] = useState(SAMPLE_SOP)
   const [engine, setEngine] = useState('-')
@@ -826,6 +752,7 @@ export default function App() {
       })
       const saved = await savePlaybook({ id: sopId, title, raw_text: text, engine, nodes: sanitizedNodes, edges })
       setSopId(saved.id)
+      setSopVersion(saved.version || 1)
       reloadPlaybooks()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'บันทึกไม่สำเร็จ')
@@ -943,6 +870,7 @@ export default function App() {
     try {
       const res = await startSimulationRun({
         playbook_id: sopId || undefined,
+        playbook_version: sopVersion || undefined,
         playbook_title: title,
         scenario_id: selectedScenarioId || undefined,
         nodes,
@@ -1171,310 +1099,40 @@ export default function App() {
           Engine (.env): <strong>{engine}</strong> · {nodes.length} nodes
         </div>
 
-        <div className="border-t pt-2">
-          <details className="text-xs" open>
-            <summary className="cursor-pointer font-bold text-slate-700">
-              Run Session Inputs (ไม่บันทึกลง SOP)
-            </summary>
-            <p className="mt-1 text-[10px] text-slate-500">
-              ค่าสำหรับเคสปัจจุบันเท่านั้น (เชื่อม 2 ทางกับบล็อกในกราฟ และไม่เซฟลง SOP)
-            </p>
-
-            {scenarios.length > 0 && (
-              <div className="mt-2 rounded border border-indigo-200 bg-indigo-50/60 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[10px] font-bold text-indigo-950">🎯 Training Scenario (โจทย์จำลอง)</span>
-                  {activeScenario && (
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
-                        activeScenario.difficulty === 'hard'
-                          ? 'bg-rose-100 text-rose-800'
-                          : activeScenario.difficulty === 'medium'
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-emerald-100 text-emerald-800'
-                      }`}
-                    >
-                      {activeScenario.difficulty}
-                    </span>
-                  )}
-                </div>
-                <select
-                  value={selectedScenarioId}
-                  onChange={(e) => handleSelectScenario(e.target.value)}
-                  aria-label="Training Scenario"
-                  className="w-full rounded border border-indigo-300 bg-white px-2 py-1 text-[11px] text-slate-800"
-                >
-                  <option value="">-- โหมดปกติ (ไม่ใช้ Scenario) --</option>
-                  {scenarios.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      [{s.difficulty}] {s.title}
-                    </option>
-                  ))}
-                </select>
-                {activeScenario && (
-                  <p className="text-[10px] leading-snug text-indigo-900">{activeScenario.description}</p>
-                )}
-              </div>
-            )}
-
-            {nodes.length > 0 && (
-              <div className="mt-2 rounded border border-emerald-200 bg-emerald-50/60 p-2 space-y-1.5">
-                {!activeRun || activeRun.status !== 'in_progress' ? (
-                  <button
-                    type="button"
-                    onClick={handleStartServerRun}
-                    disabled={submittingRun}
-                    className="w-full rounded bg-emerald-600 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
-                  >
-                    {submittingRun ? 'กำลังเริ่มรอบฝึก...' : '🧪 เริ่มรอบฝึก (บันทึกผลและให้คะแนน)'}
-                  </button>
-                ) : (
-                  <>
-                    <div className="flex items-center justify-between gap-1 text-[10px] font-bold text-emerald-950">
-                      <span>● กำลังฝึกบน Server</span>
-                      <span className="font-mono text-[9px] text-emerald-700">{activeRun.id.slice(0, 14)}…</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={finalVerdict}
-                        onChange={(e) => setFinalVerdict(e.target.value as ScenarioVerdict)}
-                        aria-label="Final Verdict"
-                        className="rounded border border-emerald-300 bg-white px-1.5 py-1 text-[10px] font-semibold text-slate-800"
-                      >
-                        <option value="malicious">⚠ Malicious</option>
-                        <option value="suspicious">△ Suspicious</option>
-                        <option value="clean">✓ Clean / FP</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={handleCompleteServerRun}
-                        disabled={submittingRun}
-                        className="flex-1 rounded bg-emerald-700 py-1 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50"
-                      >
-                        {submittingRun ? 'กำลังคำนวณ...' : '🏁 ส่งคำตอบ'}
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={runSummary}
-                      onChange={(e) => setRunSummary(e.target.value)}
-                      placeholder="สรุปเหตุผลสั้น ๆ (ไม่บังคับ)..."
-                      className="w-full rounded border border-emerald-200 bg-white px-2 py-1 text-[10px]"
-                    />
-                  </>
-                )}
-              </div>
-            )}
-
-            {allowLiveExecution && (
-              <div className="mt-2 flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2 py-1">
-                <span className="text-[10px] font-bold text-slate-700">โหมดรัน:</span>
-                <div className="flex rounded border border-slate-300 bg-white p-0.5 text-[10px] font-bold">
-                  <button
-                    type="button"
-                    onClick={() => setExecutionMode('sandbox')}
-                    className={`rounded px-2 py-0.5 ${
-                      executionMode === 'sandbox' ? 'bg-slate-800 text-white' : 'text-slate-600'
-                    }`}
-                  >
-                    Sandbox
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExecutionMode('live')}
-                    className={`rounded px-2 py-0.5 ${
-                      executionMode === 'live' ? 'bg-emerald-600 text-white' : 'text-slate-600'
-                    }`}
-                  >
-                    Live API
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {sessionAuthTools.length > 0 && (
-              <div className="mt-2 rounded border border-amber-200 bg-amber-50/70 p-2">
-                <div className="text-[10px] font-bold text-amber-900 mb-1">
-                  🔑 Session API Keys (ชั่วคราว ไม่เซฟลง SOP)
-                </div>
-                <div className="space-y-1.5">
-                  {sessionAuthTools.map((t) => (
-                    <label key={`auth-${t.id}`} className="block text-[10px] font-semibold text-amber-950">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="truncate">{t.name}</span>
-                        <span className="font-mono text-[9px] font-normal text-amber-700">
-                          {t.auth?.env_var || t.auth?.key_name || t.auth?.type}
-                        </span>
-                      </div>
-                      <input
-                        type="password"
-                        value={sessionAuthKeys[t.id] || ''}
-                        placeholder={
-                          t.auth?.type === 'basic'
-                            ? 'user:password หรือ base64...'
-                            : `กรอก API Key สำหรับ ${t.name}...`
-                        }
-                        onChange={(e) =>
-                          setSessionAuthKeys((prev) => ({ ...prev, [t.id]: e.target.value }))
-                        }
-                        className="mt-0.5 w-full rounded border border-amber-300 bg-white px-1.5 py-1 font-mono text-[11px] font-normal"
-                      />
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {nodes.length === 0 ? (
-              <div className="mt-2 rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
-                สร้างหรือโหลด SOP เพื่อแสดงช่องกรอก Input ตามบล็อก
-              </div>
-            ) : sopInputData.blocks.length === 0 ? (
-              <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600">
-                SOP นี้ไม่มีช่องที่ต้องกรอกเพิ่ม สามารถกดรันได้เลย
-              </div>
-            ) : (
-              <div className="mt-2 space-y-2">
-                {sopInputData.sharedAlertKeys.length > 0 && (
-                  <div className="rounded border border-indigo-200 bg-indigo-50/70 p-2">
-                    <div className="text-[10px] font-bold text-indigo-900 mb-1">
-                      ค่าใช้ร่วมกัน (Shared)
-                    </div>
-                    <div className="grid grid-cols-1 gap-1.5">
-                      {sopInputData.sharedAlertKeys.map((item) => (
-                        <label key={`shared-${item.key}`} className="text-[10px] font-semibold text-indigo-900">
-                          <div className="flex items-center justify-between">
-                            <span className="font-mono">alert.{item.key}</span>
-                            <span className="text-[9px] font-normal text-indigo-700">
-                              ใช้ร่วมกัน {item.blockCount} บล็อก
-                            </span>
-                          </div>
-                          <input
-                            type="text"
-                            value={alertContext[item.key] || ''}
-                            placeholder={`กรอก ${item.key} (ใช้ทุกบล็อกที่ผูก)...`}
-                            onChange={(e) =>
-                              setAlertContext((p) => ({ ...p, [item.key]: e.target.value }))
-                            }
-                            className="mt-0.5 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 font-mono text-[11px] font-normal"
-                          />
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {sopInputData.blocks.map((block) => {
-                  const nodeStatus = statuses[block.nodeId] || 'idle'
-                  const isSkipped = pipelineState.nodeStates[block.nodeId]?.availability === 'skipped'
-                  const statusDot =
-                    nodeStatus === 'running'
-                      ? 'bg-blue-500 animate-pulse'
-                      : nodeStatus === 'success'
-                        ? 'bg-emerald-500'
-                        : nodeStatus === 'failed'
-                          ? 'bg-rose-500'
-                          : 'bg-slate-300'
-
-                  return (
-                    <div
-                      key={`block-${block.nodeId}`}
-                      className={`rounded border p-2 transition-opacity ${
-                        isSkipped
-                          ? 'border-slate-200 bg-slate-50 opacity-50'
-                          : 'border-slate-200 bg-slate-50/80'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-1.5 mb-1.5">
-                        <div className="flex items-center gap-1 min-w-0">
-                          <span
-                            className={`shrink-0 rounded px-1 py-0.5 text-[8px] font-bold uppercase ${
-                              block.nodeType === 'lookup'
-                                ? 'bg-sky-200 text-sky-900'
-                                : 'bg-slate-200 text-slate-800'
-                            }`}
-                          >
-                            {block.nodeType}
-                          </span>
-                          <span className="truncate text-[11px] font-semibold text-slate-800" title={block.label}>
-                            {block.stepIndex}. {block.label}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <span className="text-[9px] font-medium text-slate-500">{block.toolName}</span>
-                          <span className={`inline-block h-2 w-2 rounded-full ${statusDot}`} title={nodeStatus} />
-                        </div>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        {block.fields.map((field) => {
-                          const missingRequired =
-                            field.required && !field.runtimeVal.trim() && !field.sharedHint
-                          return (
-                            <label key={`block-${block.nodeId}-${field.key}`} className="block text-[10px]">
-                              <div className="flex items-center justify-between gap-1 font-mono font-semibold text-slate-700">
-                                <span>
-                                  {field.isSecret ? '🔑 ' : ''}
-                                  {field.key}
-                                  {field.required && <span className="text-rose-600">*</span>}
-                                </span>
-                                <span className="text-[9px] font-normal text-slate-400">
-                                  {field.location}
-                                </span>
-                              </div>
-                              <input
-                                type={field.isSecret ? 'password' : 'text'}
-                                value={field.runtimeVal}
-                                disabled={isSkipped}
-                                placeholder={
-                                  field.sharedHint
-                                    ? `Shared: ${field.sharedHint}`
-                                    : `กรอก ${field.key}...`
-                                }
-                                onChange={(e) =>
-                                  handleChangeRuntimeInput(block.nodeId, field.key, e.target.value)
-                                }
-                                className={`mt-0.5 w-full rounded border px-1.5 py-1 font-mono text-[11px] font-normal outline-none ${
-                                  missingRequired
-                                    ? 'border-rose-300 bg-rose-50/70 text-rose-900 placeholder:text-rose-400'
-                                    : 'border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-blue-500'
-                                }`}
-                              />
-                            </label>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleRunAll(hasPendingReadyStep)}
-                disabled={nodes.length === 0 || isRunningAll}
-                className="rounded bg-indigo-600 py-1.5 text-[11px] font-bold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isRunningAll ? 'กำลังรัน...' : hasPendingReadyStep ? '▶ รันต่อที่เหลือ' : '▶ รันทั้งหมด'}
-              </button>
-              <button
-                type="button"
-                onClick={handleResetExecution}
-                disabled={
-                  nodes.length === 0 &&
-                  Object.keys(runtimeInputs).length === 0 &&
-                  Object.keys(alertContext).length === 0 &&
-                  Object.keys(sessionAuthKeys).length === 0
-                }
-                className="rounded border border-slate-300 bg-white py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-              >
-                ↺ รีเซ็ต / ล้างค่า
-              </button>
-            </div>
-          </details>
-        </div>
+        <ExecutionPanel
+          nodes={nodes}
+          scenarios={scenarios}
+          selectedScenarioId={selectedScenarioId}
+          activeScenario={activeScenario}
+          onSelectScenario={handleSelectScenario}
+          activeRun={activeRun}
+          submittingRun={submittingRun}
+          finalVerdict={finalVerdict}
+          runSummary={runSummary}
+          onChangeFinalVerdict={setFinalVerdict}
+          onChangeRunSummary={setRunSummary}
+          onStartServerRun={handleStartServerRun}
+          onCompleteServerRun={handleCompleteServerRun}
+          allowLiveExecution={allowLiveExecution}
+          executionMode={executionMode}
+          onChangeExecutionMode={setExecutionMode}
+          sessionAuthTools={sessionAuthTools}
+          sessionAuthKeys={sessionAuthKeys}
+          onChangeSessionAuthKey={(toolId, val) =>
+            setSessionAuthKeys((prev) => ({ ...prev, [toolId]: val }))
+          }
+          sopInputData={sopInputData}
+          alertContext={alertContext}
+          onChangeAlertField={(key, val) => setAlertContext((p) => ({ ...p, [key]: val }))}
+          statuses={statuses}
+          pipelineState={pipelineState}
+          runtimeInputs={runtimeInputs}
+          onChangeRuntimeInput={handleChangeRuntimeInput}
+          isRunningAll={isRunningAll}
+          hasPendingReadyStep={hasPendingReadyStep}
+          onRunAll={handleRunAll}
+          onResetExecution={handleResetExecution}
+        />
 
         <div className="border-t pt-2">
           <div className="text-xs font-bold mb-1">รายการที่บันทึกไว้ ({savedList.length})</div>
@@ -1484,7 +1142,9 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    clearActiveRun()
                     setSopId(item.id)
+                    setSopVersion(item.version || 1)
                     setTitle(item.title)
                     setText(item.raw_text)
                     setEngine(item.engine)
@@ -1494,9 +1154,12 @@ export default function App() {
                     setNodeOutputs({})
                     setRuntimeInputs({})
                   }}
-                  className="truncate text-left flex-1 font-medium hover:text-blue-600"
+                  className="truncate text-left flex-1 font-medium hover:text-blue-600 flex items-center gap-1 min-w-0"
                 >
-                  {item.title}
+                  <span className="truncate">{item.title}</span>
+                  <span className="shrink-0 rounded bg-slate-200 px-1 py-0.5 font-mono text-[9px] text-slate-600">
+                    v{item.version || 1}
+                  </span>
                 </button>
                 <button
                   type="button"
