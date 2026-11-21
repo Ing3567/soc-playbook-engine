@@ -5,6 +5,7 @@ import type {
   PayloadMode,
   ToolAuth,
   ToolCategory,
+  ToolCommandType,
   ToolDefinition,
   ToolPayload,
 } from './types'
