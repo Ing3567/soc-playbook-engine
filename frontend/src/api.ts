@@ -34,7 +34,7 @@ export async function deletePlaybook(id: string) {
   await fetch(`/api/sops/${id}`, { method: 'DELETE' })
 }
 
-export async function executeStep(node: FlowNode) {
+export async function executeStep(node: FlowNode, inputs?: Record<string, string>) {
   const res = await fetch('/api/execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -43,6 +43,8 @@ export async function executeStep(node: FlowNode) {
       type: node.type,
       label: node.label,
       tool: node.tool,
+      links: node.links,
+      inputs,
     }),
   })
   const data = await res.json()

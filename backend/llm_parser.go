@@ -139,9 +139,18 @@ func inferStepType(text string) string {
 			return "end"
 		}
 	}
-	for _, kw := range []string{"virustotal", "reputation", "jira", "เคสเก่า", "ค้นหา", "ตรวจสอบ", "splunk", "siem"} {
+	for _, kw := range []string{"virustotal", "reputation", "เคสเก่า", "ประวัติเคส", "ค้นหา", "ตรวจสอบ", "splunk", "siem"} {
 		if strings.Contains(lower, kw) {
 			return "lookup"
+		}
+	}
+	for i := range ConfiguredTools {
+		if ConfiguredTools[i].Category == "lookup" {
+			for _, kw := range ConfiguredTools[i].Keywords {
+				if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+					return "lookup"
+				}
+			}
 		}
 	}
 	return "action"

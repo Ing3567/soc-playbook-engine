@@ -22,6 +22,7 @@ func NewApiHandler(repo *PlaybookRepository) *ApiHandler {
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/api/generate", h.GenerateFlowchart)
 	r.GET("/api/images/:id", h.GetImage)
+	r.GET("/api/tools", h.ListTools)
 	r.GET("/api/sops", h.ListPlaybooks)
 	r.POST("/api/sops", h.SavePlaybook)
 	r.DELETE("/api/sops/:id", h.DeletePlaybook)
@@ -132,6 +133,10 @@ func (h *ApiHandler) GetImage(c *gin.Context) {
 	c.Data(http.StatusOK, meta.ContentType, data)
 }
 
+func (h *ApiHandler) ListTools(c *gin.Context) {
+	c.JSON(http.StatusOK, ListToolStatuses())
+}
+
 func (h *ApiHandler) ListPlaybooks(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -139,6 +144,11 @@ func (h *ApiHandler) ListPlaybooks(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงข้อมูลจาก MongoDB ไม่สำเร็จ"})
 		return
+	}
+	for i := range items {
+		for j := range items[i].Nodes {
+			items[i].Nodes[j].Tool = NormalizeToolID(items[i].Nodes[j].Tool)
+		}
 	}
 	c.JSON(http.StatusOK, items)
 }
@@ -148,6 +158,9 @@ func (h *ApiHandler) SavePlaybook(c *gin.Context) {
 	if err := c.ShouldBindJSON(&doc); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูลไม่ถูกต้อง"})
 		return
+	}
+	for i := range doc.Nodes {
+		doc.Nodes[i].Tool = NormalizeToolID(doc.Nodes[i].Tool)
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -176,7 +189,7 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "คำสั่งรันไม่ถูกต้อง"})
 		return
 	}
-	c.JSON(http.StatusOK, RunSandboxStep(req))
+	c.JSON(http.StatusOK, ExecuteToolStep(c.Request.Context(), req))
 }
 
 func (h *ApiHandler) ExportBpmn(c *gin.Context) {

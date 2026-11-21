@@ -45,7 +45,9 @@ export interface ExecutionLog {
   node_id: string
   label: string
   status: RunStatus
+  mode?: string
   duration_ms: number
   timestamp: string
   output: Record<string, unknown>
+  error?: string
 }

@@ -20,26 +20,24 @@ var supportedNodeTypes = map[string]bool{
 
 func MatchToolByKeywords(nodeType, label string) string {
 	lower := strings.ToLower(label)
-	switch nodeType {
-	case "lookup":
-		if strings.Contains(lower, "virustotal") || strings.Contains(lower, "vt") {
-			return "virustotal"
-		}
-		if strings.Contains(lower, "jira") || strings.Contains(lower, "เคสเก่า") {
-			return "jira_search"
-		}
-		return "abuseipdb"
-	case "action":
-		if strings.Contains(lower, "บล็อก") || strings.Contains(lower, "ระงับ") || strings.Contains(lower, "block") || strings.Contains(lower, "firewall") {
-			return "firewall_block"
-		}
-		if strings.Contains(lower, "ticket") || strings.Contains(lower, "เคส") || strings.Contains(lower, "tier") {
-			return "jira_ticket"
-		}
-		return "manual_action"
-	default:
+	if nodeType != "lookup" && nodeType != "action" {
 		return "none"
 	}
+	for i := range ConfiguredTools {
+		tool := &ConfiguredTools[i]
+		if tool.Category != nodeType {
+			continue
+		}
+		for _, kw := range tool.Keywords {
+			if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+				return tool.ID
+			}
+		}
+	}
+	if nodeType == "lookup" {
+		return "abuseipdb"
+	}
+	return "manual_action"
 }
 
 func (g *graphState) activeRegistry() *URLRegistry {
@@ -61,7 +59,7 @@ func (g *graphState) appendStepNode(step Step) string {
 
 	toolHint := cleanLabel
 	for _, l := range links {
-		toolHint += " " + l.URL + " " + l.Label
+		toolHint += " " + l.URL + " " + l.Label + " " + l.Source
 	}
 
 	id := fmt.Sprintf("n%d", len(g.nodes)+1)

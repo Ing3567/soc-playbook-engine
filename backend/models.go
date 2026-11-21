@@ -74,18 +74,22 @@ type PlaybookDocument struct {
 }
 
 type ExecutionRequest struct {
-	NodeID string `json:"node_id"`
-	Type   string `json:"type"`
-	Label  string `json:"label"`
-	Tool   string `json:"tool"`
+	NodeID string            `json:"node_id"`
+	Type   string            `json:"type"`
+	Label  string            `json:"label"`
+	Tool   string            `json:"tool"`
+	Links  []NodeLink        `json:"links,omitempty"`
+	Inputs map[string]string `json:"inputs,omitempty"`
 }
 
 type ExecutionResult struct {
 	NodeID     string         `json:"node_id"`
 	Status     string         `json:"status"`
+	Mode       string         `json:"mode,omitempty"`
 	DurationMs int64          `json:"duration_ms"`
 	Timestamp  string         `json:"timestamp"`
 	Output     map[string]any `json:"output"`
+	Error      string         `json:"error,omitempty"`
 }
 
 type ExportRequest struct {

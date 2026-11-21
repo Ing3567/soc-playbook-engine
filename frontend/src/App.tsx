@@ -22,7 +22,7 @@ const SAMPLE_SOP = `ตรวจสอบ IP การเข้าระบบ�
 ถ้าพบว่าเป็น IP อันตรายมากกว่า 10 รายการ
   ระงับบัญชีผู้ใช้งานและบล็อก IP บน Firewall
   เปิดเคสแจ้งเตือนไปยัง Tier 2
-ไม่เช่นนั้นถ้าพบประวัติเคสเก่าใน Jira
+ไม่เช่นนั้นถ้าพบประวัติเคสเก่าในระบบ Ticket
   ปิดเคส
 ไม่เช่นนั้น
   เฝ้าระวังพฤติกรรม 24 ชั่วโมง
@@ -114,14 +114,20 @@ export default function App() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [previewImage, setPreviewImage] = useState<NodeImage | null>(null)
+  const [targetIp, setTargetIp] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([])
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
 
   const nodesRef = useRef<FlowNode[]>([])
+  const runInputsRef = useRef<{ ip: string; query: string }>({ ip: '', query: '' })
   useEffect(() => {
     nodesRef.current = nodes
   }, [nodes])
+  useEffect(() => {
+    runInputsRef.current = { ip: targetIp.trim(), query: searchQuery.trim() }
+  }, [targetIp, searchQuery])
 
   const reloadPlaybooks = useCallback(async () => {
     setSavedList(await getPlaybooks())
@@ -151,16 +157,22 @@ export default function App() {
     if (!target) return
     setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
     try {
-      const res = await executeStep(target)
-      setStatuses((prev) => ({ ...prev, [nodeId]: 'success' }))
+      const inputs: Record<string, string> = {}
+      if (runInputsRef.current.ip) inputs.ip = runInputsRef.current.ip
+      if (runInputsRef.current.query) inputs.query = runInputsRef.current.query
+      const res = await executeStep(target, inputs)
+      const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
+      setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
       setLogs((prev) => [
         {
           node_id: target.id,
           label: target.label,
-          status: 'success',
+          status: nextStatus,
+          mode: res.mode,
           duration_ms: res.duration_ms,
           timestamp: res.timestamp,
           output: res.output,
+          error: res.error,
         },
         ...prev,
       ])
@@ -277,6 +289,24 @@ export default function App() {
         />
 
         {error && <div className="rounded bg-rose-50 p-2 text-xs text-rose-700 border border-rose-200">{error}</div>}
+
+        <div className="rounded border border-slate-200 bg-slate-50 p-2 space-y-1.5">
+          <div className="text-[11px] font-bold text-slate-700">Run Inputs (Optional)</div>
+          <input
+            type="text"
+            value={targetIp}
+            onChange={(e) => setTargetIp(e.target.value)}
+            className="w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono text-[11px]"
+            placeholder="Target IP (เช่น 185.220.101.42)"
+          />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono text-[11px]"
+            placeholder="Search Query / Keyword"
+          />
+        </div>
 
         <div className="grid grid-cols-2 gap-1.5">
           <button
@@ -399,14 +429,35 @@ export default function App() {
               Clear
             </button>
           </div>
-          {logs.map((log, i) => (
-            <div key={i} className="mb-1.5 rounded bg-slate-800 p-1.5 border border-slate-700">
-              <div className="text-sky-300 font-semibold">
-                [{log.timestamp}] {log.label} ({log.duration_ms} ms)
+          {logs.map((log, i) => {
+            const isFailed = log.status === 'failed'
+            const modeLabel = (log.mode || 'sandbox').toUpperCase()
+            let modeBadgeStyle = 'bg-slate-700 text-slate-300'
+            if (log.mode === 'real') modeBadgeStyle = 'bg-emerald-900/80 text-emerald-300 border border-emerald-600'
+            else if (log.mode === 'mockup') modeBadgeStyle = 'bg-indigo-900/80 text-indigo-300 border border-indigo-500'
+            else if (log.mode === 'sandbox_fallback') modeBadgeStyle = 'bg-amber-900/80 text-amber-300 border border-amber-600'
+
+            return (
+              <div
+                key={i}
+                className={`mb-1.5 rounded bg-slate-800 p-1.5 border ${
+                  isFailed ? 'border-rose-500/80' : 'border-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className={`font-semibold ${isFailed ? 'text-rose-400' : 'text-sky-300'}`}>
+                    [{log.timestamp}] {log.label} ({log.duration_ms} ms)
+                  </div>
+                  <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${modeBadgeStyle}`}>
+                    {modeLabel}
+                  </span>
+                </div>
+                <pre className="mt-1 whitespace-pre-wrap break-all text-[11px] text-slate-300">
+                  {JSON.stringify(log.output)}
+                </pre>
               </div>
-              <pre className="text-[11px] text-slate-300">{JSON.stringify(log.output)}</pre>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </main>
 
