@@ -13,14 +13,18 @@ import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
 import type {
+  AuthUser,
   EdgeCondition,
   ExecutionMode,
   FlowNode,
   FlowEdge,
   PlaybookItem,
+  RunEvent,
   RunStatus,
   ExecutionLog,
   ScenarioItem,
+  ScenarioVerdict,
+  SimulationRun,
   ToolDefinition,
   ToolCategory,
   PayloadMode,
@@ -35,6 +39,12 @@ import {
   getTools,
   getScenarios,
   getRuntimeConfig,
+  getMe,
+  setStoredAuthToken,
+  startSimulationRun,
+  getSimulationRun,
+  executeRunStep,
+  completeSimulationRun,
 } from './api'
 import { computePipelineState, formatEdgeCondition, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
 import { buildSopInputBlocks } from './runtimeParams'
@@ -42,6 +52,10 @@ import { FlowNodeCard, type ManualVerdict } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
 import { EdgeConditionModal } from './EdgeConditionModal'
+import { AuthModal } from './AuthModal'
+import { RunDashboardModal } from './RunDashboardModal'
+
+const ACTIVE_RUN_STORAGE_KEY = 'soc_active_run_id'
 
 const nodeTypes = { socNode: FlowNodeCard }
 
@@ -140,6 +154,15 @@ export default function App() {
   const [runtimeInputs, setRuntimeInputs] = useState<Record<string, Record<string, string>>>({})
   const [sessionAuthKeys, setSessionAuthKeys] = useState<Record<string, string>>({})
   const [allowLiveExecution, setAllowLiveExecution] = useState(false)
+  const [authEnabled, setAuthEnabled] = useState(false)
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null)
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [activeRun, setActiveRun] = useState<SimulationRun | null>(null)
+  const [finalVerdict, setFinalVerdict] = useState<ScenarioVerdict>('malicious')
+  const [runSummary, setRunSummary] = useState('')
+  const [submittingRun, setSubmittingRun] = useState(false)
+  const [dashboardOpen, setDashboardOpen] = useState(false)
+  const [dashboardInitialRunId, setDashboardInitialRunId] = useState<string | null>(null)
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('sandbox')
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [nodeOutputs, setNodeOutputs] = useState<Record<string, Record<string, unknown>>>({})
@@ -213,6 +236,8 @@ export default function App() {
   executionModeRef.current = executionMode
   const selectedScenarioIdRef = useRef(selectedScenarioId)
   selectedScenarioIdRef.current = selectedScenarioId
+  const activeRunRef = useRef(activeRun)
+  activeRunRef.current = activeRun
   const statusesRef = useRef(statuses)
   statusesRef.current = statuses
   const nodeOutputsRef = useRef(nodeOutputs)
@@ -251,15 +276,94 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => {
+  const hydrateFromServerRun = useCallback((run: SimulationRun, events: RunEvent[] = []) => {
+    setActiveRun(run)
+    try {
+      if (run.status === 'in_progress') {
+        sessionStorage.setItem(ACTIVE_RUN_STORAGE_KEY, run.id)
+      } else {
+        sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+      }
+    } catch {
+      // ignore storage errors
+    }
+    if (run.playbook_id) setSopId(run.playbook_id)
+    if (run.playbook_title) setTitle(run.playbook_title)
+    if (run.scenario_id) setSelectedScenarioId(run.scenario_id)
+    if (Array.isArray(run.nodes) && run.nodes.length > 0) {
+      setNodes(run.nodes)
+      setEdges(run.edges || [])
+    }
+    const nextAlert: Record<string, string> = {}
+    for (const [k, v] of Object.entries(run.alert || {})) {
+      if (v !== null && v !== undefined) nextAlert[k] = String(v)
+    }
+    setAlertContext(nextAlert)
+    setStatuses(run.node_statuses || {})
+    setNodeOutputs(run.node_outputs || {})
+    if (events.length > 0) {
+      const mappedLogs: ExecutionLog[] = [...events]
+        .reverse()
+        .filter((ev) => ev.output)
+        .map((ev) => ({
+          node_id: ev.node_id || ev.run_id,
+          label: ev.node_label || ev.action,
+          status: (ev.status === 'failed' ? 'failed' : 'success') as RunStatus,
+          duration_ms: ev.duration_ms || 0,
+          timestamp: new Date(ev.timestamp).toTimeString().slice(0, 8),
+          output: ev.output || {},
+        }))
+      setLogs(mappedLogs)
+    }
+  }, [])
+
+  const refreshWorkspaceData = useCallback(async () => {
     reloadPlaybooks()
     reloadTools()
     getScenarios(true).then(setScenarios)
-    getRuntimeConfig().then((cfg) => {
-      setAllowLiveExecution(cfg.allow_live_execution)
-      if (!cfg.allow_live_execution) setExecutionMode('sandbox')
-    })
   }, [reloadPlaybooks, reloadTools])
+
+  useEffect(() => {
+    let active = true
+    async function boot() {
+      const cfg = await getRuntimeConfig()
+      if (!active) return
+      setAllowLiveExecution(cfg.allow_live_execution)
+      setAuthEnabled(cfg.auth_enabled)
+      if (!cfg.allow_live_execution) setExecutionMode('sandbox')
+
+      const me = await getMe()
+      if (!active) return
+      setCurrentUser(me)
+      if (cfg.auth_enabled && !me) {
+        setAuthModalOpen(true)
+        return
+      }
+      await refreshWorkspaceData()
+
+      try {
+        const savedRunId = sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY)
+        if (savedRunId) {
+          const data = await getSimulationRun(savedRunId)
+          if (active && data.run.status === 'in_progress') {
+            hydrateFromServerRun(data.run, data.events)
+          } else {
+            sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+          }
+        }
+      } catch {
+        try {
+          sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+        } catch {
+          // ignore
+        }
+      }
+    }
+    boot()
+    return () => {
+      active = false
+    }
+  }, [refreshWorkspaceData, hydrateFromServerRun])
 
   const handleChangeRuntimeInput = useCallback((nodeId: string, key: string, value: string) => {
     setRuntimeInputs((prev) => ({
@@ -382,6 +486,12 @@ export default function App() {
 
   const handleSelectScenario = useCallback(
     (scenarioId: string) => {
+      setActiveRun(null)
+      try {
+        sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+      } catch {
+        // ignore
+      }
       setSelectedScenarioId(scenarioId)
       setStatuses({})
       setNodeOutputs({})
@@ -403,13 +513,41 @@ export default function App() {
   )
 
   const completeManualNode = useCallback(
-    (nodeId: string, verdict: ManualVerdict, openedUrl?: string) => {
+    async (nodeId: string, verdict: ManualVerdict, openedUrl?: string) => {
       const target = nodesRef.current.find((n) => n.id === nodeId)
       if (!target) return
       const pState = pipelineRef.current.nodeStates[nodeId]
       if (pState && (pState.availability === 'locked' || pState.availability === 'skipped')) {
         return
       }
+
+      const currentRun = activeRunRef.current
+      if (currentRun && currentRun.status === 'in_progress') {
+        try {
+          const res = await executeRunStep(currentRun.id, nodeId, {
+            manual_verdict: verdict,
+            notes: openedUrl ? `Opened URL: ${openedUrl}` : undefined,
+          })
+          setActiveRun(res.run)
+          setStatuses(res.run.node_statuses || {})
+          setNodeOutputs(res.run.node_outputs || {})
+          setLogs((prev) => [
+            {
+              node_id: target.id,
+              label: target.label,
+              status: 'success',
+              duration_ms: res.event.duration_ms || 0,
+              timestamp: new Date(res.event.timestamp).toTimeString().slice(0, 8),
+              output: res.event.output || {},
+            },
+            ...prev,
+          ])
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'บันทึกผล Manual Node ไม่สำเร็จ')
+        }
+        return
+      }
+
       if (statusesRef.current[nodeId] === 'success') {
         invalidateFromNode(nodeId, false)
       }
@@ -465,12 +603,53 @@ export default function App() {
       }
 
       setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
+      const canonicalTool = target.tool === 'jira_ticket' ? 'ticket' : target.tool
+
+      const currentRun = activeRunRef.current
+      if (currentRun && currentRun.status === 'in_progress') {
+        try {
+          const res = await executeRunStep(currentRun.id, nodeId, {
+            runtime_inputs: runtimeInputsRef.current[nodeId],
+            runtime_auth: sessionAuthKeysRef.current[canonicalTool],
+          })
+          setActiveRun(res.run)
+          setStatuses(res.run.node_statuses || {})
+          setNodeOutputs(res.run.node_outputs || {})
+          const nextStatus: RunStatus = res.event.status === 'failed' ? 'failed' : 'success'
+          setLogs((prev) => [
+            {
+              node_id: target.id,
+              label: target.label,
+              status: nextStatus,
+              duration_ms: res.event.duration_ms || 0,
+              timestamp: new Date(res.event.timestamp).toTimeString().slice(0, 8),
+              output: res.event.output || {},
+            },
+            ...prev,
+          ])
+          return { ok: nextStatus === 'success', output: res.event.output ?? null }
+        } catch (e) {
+          setStatuses((prev) => ({ ...prev, [nodeId]: 'failed' }))
+          setLogs((prev) => [
+            {
+              node_id: target.id,
+              label: target.label,
+              status: 'failed',
+              duration_ms: 0,
+              timestamp: new Date().toTimeString().slice(0, 8),
+              output: { error: e instanceof Error ? e.message : 'Run step failed' },
+            },
+            ...prev,
+          ])
+          return { ok: false, output: null }
+        }
+      }
+
       const runtimeCtx: Record<string, unknown> = {
         alert: alertContextRef.current,
         prev: extraContext?.prev ?? pState?.upstreamOutput ?? {},
         nodes: extraContext?.nodes ?? nodeOutputsRef.current,
       }
-      const canonicalTool = target.tool === 'jira_ticket' ? 'ticket' : target.tool
       try {
         const res = await executeStep(target, runtimeCtx, runtimeInputsRef.current[nodeId], {
           runtimeAuth: sessionAuthKeysRef.current[canonicalTool],
@@ -746,7 +925,65 @@ export default function App() {
     }
   }
 
+  function clearActiveRun() {
+    setActiveRun(null)
+    try {
+      sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleStartServerRun() {
+    if (nodes.length === 0 || submittingRun) return
+    setError('')
+    setSubmittingRun(true)
+    try {
+      const res = await startSimulationRun({
+        playbook_id: sopId || undefined,
+        playbook_title: title,
+        scenario_id: selectedScenarioId || undefined,
+        nodes,
+        edges,
+        alert: alertContext,
+        mode: executionMode,
+      })
+      hydrateFromServerRun(res.run, res.events)
+      setRunSummary('')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'เริ่มรอบฝึกบน Server ไม่สำเร็จ')
+    } finally {
+      setSubmittingRun(false)
+    }
+  }
+
+  async function handleCompleteServerRun() {
+    if (!activeRun || activeRun.status !== 'in_progress' || submittingRun) return
+    setError('')
+    setSubmittingRun(true)
+    try {
+      const res = await completeSimulationRun(activeRun.id, finalVerdict, runSummary.trim() || undefined)
+      clearActiveRun()
+      setDashboardInitialRunId(res.run.id)
+      setDashboardOpen(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'ส่งคำตอบไม่สำเร็จ')
+    } finally {
+      setSubmittingRun(false)
+    }
+  }
+
+  function handleLogout() {
+    setStoredAuthToken('')
+    clearActiveRun()
+    setCurrentUser(null)
+    if (authEnabled) {
+      setAuthModalOpen(true)
+    }
+  }
+
   function handleResetExecution() {
+    clearActiveRun()
     setStatuses({})
     setNodeOutputs({})
     setRuntimeInputs({})
@@ -758,27 +995,78 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-800">
       <aside className="no-print flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white p-3 gap-3 overflow-y-auto">
-        <div className="flex items-center justify-between">
-          <h1 className="text-base font-bold">SOC Playbook Engine</h1>
-          <button
-            type="button"
-            onClick={() => {
-              setSopId('')
-              setTitle('New SOP')
-              setText(SAMPLE_SOP)
-              setEngine('-')
-              setNodes([])
-              setEdges([])
-              setStatuses({})
-              setNodeOutputs({})
-              setRuntimeInputs({})
-              setLogs([])
-              setError('')
-            }}
-            className="text-xs text-blue-600 hover:underline"
-          >
-            + สร้างใหม่
-          </button>
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <h1 className="text-base font-bold">SOC Playbook Engine</h1>
+            <button
+              type="button"
+              onClick={() => {
+                clearActiveRun()
+                setSopId('')
+                setTitle('New SOP')
+                setText(SAMPLE_SOP)
+                setEngine('-')
+                setNodes([])
+                setEdges([])
+                setStatuses({})
+                setNodeOutputs({})
+                setRuntimeInputs({})
+                setLogs([])
+                setError('')
+              }}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              + สร้างใหม่
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px]">
+            <div className="flex items-center gap-1 min-w-0">
+              <span className="truncate font-semibold text-slate-700">
+                👤 {currentUser ? currentUser.display_name || currentUser.username : 'Guest'}
+              </span>
+              {currentUser && (
+                <span
+                  className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-bold uppercase ${
+                    currentUser.role === 'instructor'
+                      ? 'bg-indigo-100 text-indigo-800'
+                      : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {currentUser.role}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setDashboardInitialRunId(activeRun?.id ?? null)
+                  setDashboardOpen(true)
+                }}
+                className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-bold text-slate-700 hover:bg-slate-100"
+              >
+                📊 ผลฝึก
+              </button>
+              {currentUser && authEnabled ? (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 font-bold text-rose-700 hover:bg-rose-100"
+                >
+                  ออก
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setAuthModalOpen(true)}
+                  className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 font-bold text-blue-700 hover:bg-blue-100"
+                >
+                  🔐 Login
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         <input
@@ -923,6 +1211,55 @@ export default function App() {
                 </select>
                 {activeScenario && (
                   <p className="text-[10px] leading-snug text-indigo-900">{activeScenario.description}</p>
+                )}
+              </div>
+            )}
+
+            {nodes.length > 0 && (
+              <div className="mt-2 rounded border border-emerald-200 bg-emerald-50/60 p-2 space-y-1.5">
+                {!activeRun || activeRun.status !== 'in_progress' ? (
+                  <button
+                    type="button"
+                    onClick={handleStartServerRun}
+                    disabled={submittingRun}
+                    className="w-full rounded bg-emerald-600 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {submittingRun ? 'กำลังเริ่มรอบฝึก...' : '🧪 เริ่มรอบฝึก (บันทึกผลและให้คะแนน)'}
+                  </button>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between gap-1 text-[10px] font-bold text-emerald-950">
+                      <span>● กำลังฝึกบน Server</span>
+                      <span className="font-mono text-[9px] text-emerald-700">{activeRun.id.slice(0, 14)}…</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={finalVerdict}
+                        onChange={(e) => setFinalVerdict(e.target.value as ScenarioVerdict)}
+                        aria-label="Final Verdict"
+                        className="rounded border border-emerald-300 bg-white px-1.5 py-1 text-[10px] font-semibold text-slate-800"
+                      >
+                        <option value="malicious">⚠ Malicious</option>
+                        <option value="suspicious">△ Suspicious</option>
+                        <option value="clean">✓ Clean / FP</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={handleCompleteServerRun}
+                        disabled={submittingRun}
+                        className="flex-1 rounded bg-emerald-700 py-1 text-[10px] font-bold text-white hover:bg-emerald-800 disabled:opacity-50"
+                      >
+                        {submittingRun ? 'กำลังคำนวณ...' : '🏁 ส่งคำตอบ'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={runSummary}
+                      onChange={(e) => setRunSummary(e.target.value)}
+                      placeholder="สรุปเหตุผลสั้น ๆ (ไม่บังคับ)..."
+                      className="w-full rounded border border-emerald-200 bg-white px-2 py-1 text-[10px]"
+                    />
+                  </>
                 )}
               </div>
             )}
@@ -1262,6 +1599,27 @@ export default function App() {
         targetLabel={nodes.find((n) => n.id === edges.find((e) => e.id === editingEdgeId)?.target)?.label}
         onClose={() => setEditingEdgeId(null)}
         onSave={updateEdgeCondition}
+      />
+
+      <AuthModal
+        open={authModalOpen}
+        required={authEnabled && !currentUser}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthenticated={(user) => {
+          setCurrentUser(user)
+          refreshWorkspaceData()
+        }}
+      />
+
+      <RunDashboardModal
+        open={dashboardOpen}
+        user={currentUser}
+        initialRunId={dashboardInitialRunId}
+        onClose={() => {
+          setDashboardOpen(false)
+          setDashboardInitialRunId(null)
+        }}
+        onResumeRun={(run, events) => hydrateFromServerRun(run, events)}
       />
     </div>
   )

@@ -69,3 +69,7 @@ Place `.env` at the repository root (next to `backend/` and `frontend/`):
 | `HF_TOKEN` | — | Hugging Face API token (if `LLM_PROVIDER=huggingface`) |
 | `ALLOW_LIVE_EXECUTION` | `false` | Enables Live HTTP step execution |
 | `LIVE_ALLOWED_HOSTS` | — | Comma-separated hostname allowlist for Live HTTP mode |
+| `AUTH_ENABLED` | `false` | Require username/password login + role-based access (`trainee`/`instructor`) |
+| `AUTH_SECRET` | *(random)* | Signing secret for HS256 JWT tokens (set a strong value in production) |
+| `SEED_INSTRUCTOR_USER` / `PASS` | `instructor` / `instructor123` | Initial seeded Instructor account (created only if missing) |
+| `SEED_TRAINEE_USER` / `PASS` | `trainee` / `trainee123` | Initial seeded Trainee account (created only if missing) |

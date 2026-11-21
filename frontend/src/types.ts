@@ -134,3 +134,67 @@ export interface ScenarioItem {
 }
 
 export type ScenarioPayload = Omit<ScenarioItem, 'is_builtin' | 'created_at' | 'updated_at'>
+
+export type UserRole = 'trainee' | 'instructor'
+
+export interface AuthUser {
+  id: string
+  username: string
+  display_name: string
+  role: UserRole
+}
+
+export interface RunScore {
+  total: number
+  verdict_points: number
+  coverage_points: number
+  path_points: number
+  speed_points: number
+  duration_sec: number
+  max_duration_sec?: number
+  expected_verdict?: string
+  submitted_verdict: string
+  missed_nodes?: string[]
+  missed_edges?: string[]
+  feedback: string[]
+}
+
+export interface SimulationRun {
+  id: string
+  scenario_id?: string
+  scenario_title?: string
+  playbook_id?: string
+  playbook_title: string
+  nodes: FlowNode[]
+  edges: FlowEdge[]
+  alert?: Record<string, unknown>
+  trainee_id: string
+  trainee_name: string
+  mode: ExecutionMode
+  status: 'in_progress' | 'completed' | 'abandoned'
+  node_statuses: Record<string, RunStatus>
+  node_outputs: Record<string, Record<string, unknown>>
+  traversed_edges?: string[]
+  final_verdict?: ScenarioVerdict
+  summary?: string
+  score?: RunScore
+  started_at: string
+  completed_at?: string
+  updated_at: string
+}
+
+export interface RunEvent {
+  id: string
+  run_id: string
+  seq: number
+  node_id?: string
+  node_label?: string
+  action: 'run_started' | 'step_executed' | 'manual_verdict' | 'run_completed'
+  status?: string
+  input?: Record<string, unknown>
+  output?: Record<string, unknown>
+  verdict?: string
+  notes?: string
+  duration_ms?: number
+  timestamp: string
+}
