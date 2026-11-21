@@ -170,6 +170,17 @@ export default function App() {
     }
     return list
   }, [nodes, tools])
+  const hasPendingReadyStep = useMemo(
+    () =>
+      Object.values(statuses).some((s) => s === 'success') &&
+      nodes.some(
+        (n) =>
+          (n.type === 'lookup' || n.type === 'action') &&
+          statuses[n.id] !== 'success' &&
+          pipelineState.nodeStates[n.id]?.availability === 'ready'
+      ),
+    [nodes, statuses, pipelineState]
+  )
 
   const nodesRef = useRef<FlowNode[]>([])
   nodesRef.current = nodes
@@ -578,11 +589,16 @@ export default function App() {
     }
   }
 
-  async function handleRunAll() {
+  async function handleRunAll(resume = false) {
     if (nodes.length === 0 || isRunningAll) return
     setIsRunningAll(true)
-    setStatuses({})
-    setNodeOutputs({})
+
+    const initialStatuses = resume ? { ...statusesRef.current } : {}
+    const initialOutputs: Record<string, Record<string, unknown>> = resume ? { ...nodeOutputsRef.current } : {}
+    if (!resume) {
+      setStatuses({})
+      setNodeOutputs({})
+    }
 
     try {
       const nodeMap = new Map(nodes.map((n) => [n.id, n]))
@@ -598,7 +614,7 @@ export default function App() {
 
       const startNode = nodes.find((n) => inDegree.get(n.id) === 0) ?? nodes[0]
       const visited = new Set<string>()
-      const localOutputs: Record<string, unknown> = {}
+      const localOutputs: Record<string, unknown> = { ...initialOutputs }
       let current: FlowNode | undefined = startNode
       let lastOutput: Record<string, unknown> | null = null
 
@@ -607,38 +623,46 @@ export default function App() {
         const outEdges = outgoing.get(current.id) ?? []
 
         if (current.type === 'lookup' || current.type === 'action') {
-          const canonicalTool = current.tool === 'jira_ticket' ? 'ticket' : current.tool
-          const toolDef = toolsRef.current.find((t) => t.id === canonicalTool)
-          const isManualNode =
-            toolDef?.command_type === 'manual' ||
-            canonicalTool === 'manual_lookup' ||
-            canonicalTool === 'manual_action'
-          if (isManualNode) {
-            setLogs((prev) => [
-              {
-                node_id: current!.id,
-                label: current!.label,
-                status: 'idle',
-                duration_ms: 0,
-                timestamp: new Date().toTimeString().slice(0, 8),
-                output: {
-                  mode: 'manual',
-                  message: 'หยุดรอ Analyst ตรวจผ่านเบราว์เซอร์และกดยืนยันผลบนโหนดนี้ก่อนดำเนินการต่อ',
+          if (resume && initialStatuses[current.id] === 'success') {
+            const existingOut = initialOutputs[current.id] ?? null
+            lastOutput = existingOut
+            if (existingOut) {
+              localOutputs[current.id] = existingOut
+            }
+          } else {
+            const canonicalTool = current.tool === 'jira_ticket' ? 'ticket' : current.tool
+            const toolDef = toolsRef.current.find((t) => t.id === canonicalTool)
+            const isManualNode =
+              toolDef?.command_type === 'manual' ||
+              canonicalTool === 'manual_lookup' ||
+              canonicalTool === 'manual_action'
+            if (isManualNode) {
+              setLogs((prev) => [
+                {
+                  node_id: current!.id,
+                  label: current!.label,
+                  status: 'idle',
+                  duration_ms: 0,
+                  timestamp: new Date().toTimeString().slice(0, 8),
+                  output: {
+                    mode: 'manual',
+                    message: 'หยุดรอ Analyst ตรวจผ่านเบราว์เซอร์และกดยืนยันผลบนโหนดนี้ก่อนดำเนินการต่อ',
+                  },
                 },
-              },
-              ...prev,
-            ])
-            break
-          }
+                ...prev,
+              ])
+              break
+            }
 
-          const res = await runNode(current.id, {
-            prev: lastOutput ?? {},
-            nodes: localOutputs,
-          })
-          if (!res.ok) break
-          lastOutput = res.output
-          if (res.output) {
-            localOutputs[current.id] = res.output
+            const res = await runNode(current.id, {
+              prev: lastOutput ?? {},
+              nodes: localOutputs,
+            })
+            if (!res.ok) break
+            lastOutput = res.output
+            if (res.output) {
+              localOutputs[current.id] = res.output
+            }
           }
         } else if (current.type === 'end') {
           break
@@ -983,11 +1007,11 @@ export default function App() {
             <div className="mt-2 grid grid-cols-2 gap-1.5">
               <button
                 type="button"
-                onClick={handleRunAll}
+                onClick={() => handleRunAll(hasPendingReadyStep)}
                 disabled={nodes.length === 0 || isRunningAll}
                 className="rounded bg-indigo-600 py-1.5 text-[11px] font-bold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isRunningAll ? 'กำลังรัน...' : '▶ รันทั้งหมด'}
+                {isRunningAll ? 'กำลังรัน...' : hasPendingReadyStep ? '▶ รันต่อที่เหลือ' : '▶ รันทั้งหมด'}
               </button>
               <button
                 type="button"

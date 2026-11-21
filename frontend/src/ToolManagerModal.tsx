@@ -1322,26 +1322,49 @@ export function ToolManagerModal({
                         </button>
                       </div>
 
-                      {p.mode === 'dynamic' && (
-                        <div className="flex flex-wrap items-center gap-1">
-                          <span className="text-[10px] text-slate-400">แทรกตัวแปร:</span>
-                          {DYNAMIC_VAR_CHIPS.map((chip) => (
-                            <button
-                              key={chip}
-                              type="button"
-                              onClick={() =>
-                                setForm((prev) => ({
-                                  ...prev,
-                                  params: prev.params.map((item, i) => (i === idx ? { ...item, value: chip } : item)),
-                                }))
-                              }
-                              className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 font-mono text-[10px] text-violet-700 hover:bg-violet-100"
-                            >
-                              {chip}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        {p.mode === 'dynamic' ? (
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="text-[10px] text-slate-400">แทรกตัวแปร:</span>
+                            {DYNAMIC_VAR_CHIPS.map((chip) => (
+                              <button
+                                key={chip}
+                                type="button"
+                                onClick={() =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    params: prev.params.map((item, i) => (i === idx ? { ...item, value: chip } : item)),
+                                  }))
+                                }
+                                className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 font-mono text-[10px] text-violet-700 hover:bg-violet-100"
+                              >
+                                {chip}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <span />
+                        )}
+                        <label
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-800 cursor-pointer"
+                          title="ซ่อนค่าเป็น *** ใน log และไม่บันทึกลง SOP"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(p.is_secret)}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                params: prev.params.map((item, i) =>
+                                  i === idx ? { ...item, is_secret: e.target.checked } : item
+                                ),
+                              }))
+                            }
+                            className="accent-amber-600"
+                          />
+                          🔑 ค่าความลับ (Secret)
+                        </label>
+                      </div>
                     </div>
                   ))}
                 </div>
