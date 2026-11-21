@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCaseNotConfusedWithCloseCase(t *testing.T) {
@@ -592,7 +595,15 @@ func TestRunLiveHTTPStepAuthInjectionAndMasking(t *testing.T) {
 	defer srv.Close()
 
 	prevLive := Config.AllowLiveExecution
-	defer func() { Config.AllowLiveExecution = prevLive }()
+	prevClient := liveHTTPClient
+	prevValidator := validateLiveURLFunc
+	liveHTTPClient = srv.Client()
+	validateLiveURLFunc = func(_ *url.URL, _ []string) error { return nil }
+	defer func() {
+		Config.AllowLiveExecution = prevLive
+		liveHTTPClient = prevClient
+		validateLiveURLFunc = prevValidator
+	}()
 
 	tool := &ToolDefinition{
 		ID:          "vt_live",
@@ -687,3 +698,95 @@ func TestRunLiveHTTPStepAuthInjectionAndMasking(t *testing.T) {
 	}
 }
 
+func TestSSRFProtection(t *testing.T) {
+	blockedIPs := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"172.16.0.5",
+		"192.168.1.1",
+		"169.254.169.254",
+		"100.64.0.1",
+		"0.0.0.0",
+		"::1",
+		"fe80::1",
+	}
+	for _, s := range blockedIPs {
+		ip := net.ParseIP(s)
+		if !isBlockedIP(ip) {
+			t.Fatalf("expected IP %s to be blocked", s)
+		}
+	}
+	if isBlockedIP(net.ParseIP("8.8.8.8")) {
+		t.Fatalf("expected public IP 8.8.8.8 to be allowed")
+	}
+
+	blockedURLs := []string{
+		"http://localhost:8080/api",
+		"http://127.0.0.1:27017/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/admin",
+		"http://mongo.internal:27017",
+		"file:///etc/passwd",
+	}
+	for _, raw := range blockedURLs {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if err := validateLiveTargetURL(u, nil); err == nil {
+			t.Fatalf("expected URL %q to be blocked by SSRF guard", raw)
+		}
+	}
+
+	vtURL, _ := url.Parse("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8")
+	if err := validateLiveTargetURL(vtURL, nil); err != nil {
+		t.Fatalf("expected public URL to pass when allowlist empty, got %v", err)
+	}
+	if err := validateLiveTargetURL(vtURL, []string{"api.abuseipdb.com"}); err == nil {
+		t.Fatalf("expected host not in LIVE_ALLOWED_HOSTS to be rejected")
+	}
+	if err := validateLiveTargetURL(vtURL, []string{"www.virustotal.com"}); err != nil {
+		t.Fatalf("expected allowlisted host to pass, got %v", err)
+	}
+
+	prevLive := Config.AllowLiveExecution
+	Config.AllowLiveExecution = true
+	defer func() { Config.AllowLiveExecution = prevLive }()
+
+	ssrfTool := &ToolDefinition{
+		ID:          "bad_ssrf",
+		Name:        "Internal Metadata",
+		Category:    "lookup",
+		CommandType: "http-api",
+		HTTPMethod:  "GET",
+		Endpoint:    "http://169.254.169.254/latest/meta-data/",
+	}
+	res := RunLiveHTTPStep(ExecutionRequest{NodeID: "n1", Label: "ssrf", Tool: "bad_ssrf"}, ssrfTool)
+	if res.Status != "failed" {
+		t.Fatalf("expected RunLiveHTTPStep to block metadata endpoint, got %+v", res)
+	}
+}
+
+func TestRateLimiterAndCORS(t *testing.T) {
+	if !IsOriginAllowed("http://localhost:5173", []string{"http://localhost:5173"}) {
+		t.Fatalf("expected localhost:5173 to be allowed")
+	}
+	if IsOriginAllowed("https://evil.example", []string{"http://localhost:5173"}) {
+		t.Fatalf("expected evil.example to be rejected")
+	}
+
+	limiter := NewIPRateLimiter(60, 2)
+	now := time.Now()
+	if !limiter.allowAt("1.2.3.4", now) || !limiter.allowAt("1.2.3.4", now) {
+		t.Fatalf("expected initial burst of 2 requests to pass")
+	}
+	if limiter.allowAt("1.2.3.4", now) {
+		t.Fatalf("expected 3rd immediate request to be rate-limited")
+	}
+	if !limiter.allowAt("5.6.7.8", now) {
+		t.Fatalf("expected different IP to have independent bucket")
+	}
+	if !limiter.allowAt("1.2.3.4", now.Add(2*time.Second)) {
+		t.Fatalf("expected bucket to refill after 2s")
+	}
+}
