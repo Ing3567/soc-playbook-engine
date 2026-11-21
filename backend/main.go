@@ -25,6 +25,7 @@ func main() {
 	}
 
 	router := gin.Default()
+	router.Use(CORSMiddleware(Config.AllowedOrigins))
 	handler := NewApiHandler(repo, toolRepo)
 	handler.RegisterRoutes(router)
 

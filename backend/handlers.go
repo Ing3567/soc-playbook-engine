@@ -22,8 +22,12 @@ func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository) *ApiHandl
 }
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
+	generateLimiter := NewIPRateLimiter(15, 5)
+	executeLimiter := NewIPRateLimiter(60, 20)
+
+	r.GET("/api/health", h.HealthCheck)
 	r.GET("/api/config", h.GetRuntimeConfig)
-	r.POST("/api/generate", h.GenerateFlowchart)
+	r.POST("/api/generate", RateLimitMiddleware(generateLimiter), h.GenerateFlowchart)
 	r.GET("/api/sops", h.ListPlaybooks)
 	r.POST("/api/sops", h.SavePlaybook)
 	r.DELETE("/api/sops/:id", h.DeletePlaybook)
@@ -32,10 +36,24 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/api/tools/test", h.TestToolDraft)
 	r.PUT("/api/tools/:id", h.UpdateTool)
 	r.DELETE("/api/tools/:id", h.DeleteTool)
-	r.POST("/api/execute", h.ExecuteStep)
+	r.POST("/api/execute", RateLimitMiddleware(executeLimiter), h.ExecuteStep)
 	r.POST("/api/export/bpmn", h.ExportBpmn)
 	r.POST("/api/export/cacao", h.ExportCacao)
 	r.POST("/api/export/markdown", h.ExportMarkdown)
+}
+
+func (h *ApiHandler) HealthCheck(c *gin.Context) {
+	if h.repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "mongo": "unconfigured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.repo.Ping(ctx); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "mongo": "down"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "mongo": "up"})
 }
 
 func (h *ApiHandler) GetRuntimeConfig(c *gin.Context) {
