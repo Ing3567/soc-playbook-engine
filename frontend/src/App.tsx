@@ -13,6 +13,7 @@ import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
 import type {
+  ExecutionMode,
   FlowNode,
   FlowEdge,
   PlaybookItem,
@@ -22,10 +23,19 @@ import type {
   ToolCategory,
   PayloadMode,
 } from './types'
-import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile, getTools } from './api'
+import {
+  generateFlowchart,
+  getPlaybooks,
+  savePlaybook,
+  deletePlaybook,
+  executeStep,
+  downloadExportFile,
+  getTools,
+  getRuntimeConfig,
+} from './api'
 import { computePipelineState, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
 import { buildSopInputBlocks } from './runtimeParams'
-import { FlowNodeCard } from './FlowNodeCard'
+import { FlowNodeCard, type ManualVerdict } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
 
@@ -47,6 +57,7 @@ function buildGraphLayout(
   statuses: Record<string, RunStatus>,
   availableTools: ToolDefinition[],
   onRunNode: (id: string) => void,
+  onManualComplete: (id: string, verdict: ManualVerdict, openedUrl?: string) => void,
   onChangeTool: (id: string, nextTool: string) => void,
   onEditPayload: (id: string) => void,
   onCreateTool: (category: ToolCategory) => void,
@@ -78,6 +89,7 @@ function buildGraphLayout(
         status: statuses[n.id] || 'idle',
         availableTools,
         onRun: () => onRunNode(n.id),
+        onManualComplete: (verdict: ManualVerdict, openedUrl?: string) => onManualComplete(n.id, verdict, openedUrl),
         onChangeTool: (nextTool: string) => onChangeTool(n.id, nextTool),
         onEditPayload: () => onEditPayload(n.id),
         onCreateTool: (cat: ToolCategory) => onCreateTool(cat),
@@ -115,6 +127,9 @@ export default function App() {
   const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
   const [alertContext, setAlertContext] = useState<Record<string, string>>({})
   const [runtimeInputs, setRuntimeInputs] = useState<Record<string, Record<string, string>>>({})
+  const [sessionAuthKeys, setSessionAuthKeys] = useState<Record<string, string>>({})
+  const [allowLiveExecution, setAllowLiveExecution] = useState(false)
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>('sandbox')
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
   const [nodeOutputs, setNodeOutputs] = useState<Record<string, Record<string, unknown>>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
@@ -133,6 +148,28 @@ export default function App() {
     () => buildSopInputBlocks(nodes, edges, tools, runtimeInputs, alertContext),
     [nodes, edges, tools, runtimeInputs, alertContext]
   )
+  const sessionAuthTools = useMemo(() => {
+    const seen = new Set<string>()
+    const list: ToolDefinition[] = []
+    for (const n of nodes) {
+      if (n.type !== 'lookup' && n.type !== 'action') continue
+      const canonical = n.tool === 'jira_ticket' ? 'ticket' : n.tool
+      if (!canonical || seen.has(canonical)) continue
+      const def = tools.find((t) => t.id === canonical)
+      if (
+        def &&
+        def.command_type === 'http-api' &&
+        def.auth &&
+        def.auth.type !== 'none' &&
+        def.auth.allow_runtime &&
+        !def.auth_configured
+      ) {
+        seen.add(canonical)
+        list.push(def)
+      }
+    }
+    return list
+  }, [nodes, tools])
 
   const nodesRef = useRef<FlowNode[]>([])
   nodesRef.current = nodes
@@ -144,6 +181,10 @@ export default function App() {
   alertContextRef.current = alertContext
   const runtimeInputsRef = useRef(runtimeInputs)
   runtimeInputsRef.current = runtimeInputs
+  const sessionAuthKeysRef = useRef(sessionAuthKeys)
+  sessionAuthKeysRef.current = sessionAuthKeys
+  const executionModeRef = useRef(executionMode)
+  executionModeRef.current = executionMode
   const statusesRef = useRef(statuses)
   statusesRef.current = statuses
   const nodeOutputsRef = useRef(nodeOutputs)
@@ -185,6 +226,10 @@ export default function App() {
   useEffect(() => {
     reloadPlaybooks()
     reloadTools()
+    getRuntimeConfig().then((cfg) => {
+      setAllowLiveExecution(cfg.allow_live_execution)
+      if (!cfg.allow_live_execution) setExecutionMode('sandbox')
+    })
   }, [reloadPlaybooks, reloadTools])
 
   const handleChangeRuntimeInput = useCallback((nodeId: string, key: string, value: string) => {
@@ -283,6 +328,51 @@ export default function App() {
     [setRfNodes, invalidateFromNode]
   )
 
+  const completeManualNode = useCallback(
+    (nodeId: string, verdict: ManualVerdict, openedUrl?: string) => {
+      const target = nodesRef.current.find((n) => n.id === nodeId)
+      if (!target) return
+      const pState = pipelineRef.current.nodeStates[nodeId]
+      if (pState && (pState.availability === 'locked' || pState.availability === 'skipped')) {
+        return
+      }
+      if (statusesRef.current[nodeId] === 'success') {
+        invalidateFromNode(nodeId, false)
+      }
+      const canonicalTool = target.tool === 'jira_ticket' ? 'ticket' : target.tool
+      const matchedTool = toolsRef.current.find((t) => t.id === canonicalTool)
+      const verdictText =
+        verdict === 'malicious'
+          ? 'Malicious / Suspicious (Analyst Confirmed)'
+          : verdict === 'clean'
+            ? 'Clean / Benign (Analyst Confirmed)'
+            : 'Completed (Manual Action)'
+      const output: Record<string, unknown> = {
+        mode: 'manual',
+        tool: matchedTool?.name || canonicalTool,
+        step: target.label,
+        verdict: verdictText,
+        is_malicious: verdict === 'malicious',
+        completed: true,
+        ...(openedUrl ? { opened_url: openedUrl } : {}),
+      }
+      setStatuses((prev) => ({ ...prev, [nodeId]: 'success' }))
+      setNodeOutputs((prev) => ({ ...prev, [nodeId]: output }))
+      setLogs((prev) => [
+        {
+          node_id: target.id,
+          label: target.label,
+          status: 'success',
+          duration_ms: 0,
+          timestamp: new Date().toTimeString().slice(0, 8),
+          output,
+        },
+        ...prev,
+      ])
+    },
+    [invalidateFromNode]
+  )
+
   const runNode = useCallback(
     async (
       nodeId: string,
@@ -306,8 +396,12 @@ export default function App() {
         prev: extraContext?.prev ?? pState?.upstreamOutput ?? {},
         nodes: extraContext?.nodes ?? nodeOutputsRef.current,
       }
+      const canonicalTool = target.tool === 'jira_ticket' ? 'ticket' : target.tool
       try {
-        const res = await executeStep(target, runtimeCtx, runtimeInputsRef.current[nodeId])
+        const res = await executeStep(target, runtimeCtx, runtimeInputsRef.current[nodeId], {
+          runtimeAuth: sessionAuthKeysRef.current[canonicalTool],
+          executionMode: executionModeRef.current,
+        })
         const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
         setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
         if (nextStatus === 'success') {
@@ -360,6 +454,7 @@ export default function App() {
       {},
       toolsRef.current,
       runNode,
+      completeManualNode,
       changeNodeTool,
       (id) => setEditingPayloadNodeId(id),
       (cat) => {
@@ -371,7 +466,7 @@ export default function App() {
     )
     setRfNodes(nextN)
     setRfEdges(nextE)
-  }, [nodes, edges, runNode, changeNodeTool, handleChangeRuntimeInput, setRfNodes, setRfEdges])
+  }, [nodes, edges, runNode, completeManualNode, changeNodeTool, handleChangeRuntimeInput, setRfNodes, setRfEdges])
 
   useEffect(() => {
     setRfNodes((prev) =>
@@ -385,6 +480,7 @@ export default function App() {
             availableTools: tools,
             runtimeInputs: runtimeInputs[n.id] || {},
             alertContext,
+            sessionAuthKeys,
             pipelineAvailability: pInfo?.availability ?? 'ready',
             lockedReason: pInfo?.lockedReason ?? '',
           },
@@ -410,7 +506,7 @@ export default function App() {
         }
       })
     )
-  }, [statuses, tools, pipelineState, runtimeInputs, alertContext, setRfNodes, setRfEdges])
+  }, [statuses, tools, pipelineState, runtimeInputs, alertContext, sessionAuthKeys, setRfNodes, setRfEdges])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
@@ -458,11 +554,15 @@ export default function App() {
       const sanitizedNodes = nodes.map((n) => {
         if (!n.input_payload) return n
         const toolDef = tools.find((t) => t.id === n.tool)
+        const authKeyLower = toolDef?.auth?.key_name?.trim().toLowerCase() || ''
         const cleaned: Record<string, string> = {}
         for (const [k, v] of Object.entries(n.input_payload)) {
           const val = v.trim()
           if (!val) continue
           const paramDef = toolDef?.params?.find((p) => p.key === k)
+          if (paramDef?.is_secret || (authKeyLower && k.toLowerCase() === authKeyLower)) {
+            continue
+          }
           const mode = n.param_modes?.[k] || paramDef?.mode || n.payload_mode || toolDef?.payload_mode || 'dynamic'
           if (mode === 'fixed' || val.includes('{{')) {
             cleaned[k] = val
@@ -507,6 +607,30 @@ export default function App() {
         const outEdges = outgoing.get(current.id) ?? []
 
         if (current.type === 'lookup' || current.type === 'action') {
+          const canonicalTool = current.tool === 'jira_ticket' ? 'ticket' : current.tool
+          const toolDef = toolsRef.current.find((t) => t.id === canonicalTool)
+          const isManualNode =
+            toolDef?.command_type === 'manual' ||
+            canonicalTool === 'manual_lookup' ||
+            canonicalTool === 'manual_action'
+          if (isManualNode) {
+            setLogs((prev) => [
+              {
+                node_id: current!.id,
+                label: current!.label,
+                status: 'idle',
+                duration_ms: 0,
+                timestamp: new Date().toTimeString().slice(0, 8),
+                output: {
+                  mode: 'manual',
+                  message: 'หยุดรอ Analyst ตรวจผ่านเบราว์เซอร์และกดยืนยันผลบนโหนดนี้ก่อนดำเนินการต่อ',
+                },
+              },
+              ...prev,
+            ])
+            break
+          }
+
           const res = await runNode(current.id, {
             prev: lastOutput ?? {},
             nodes: localOutputs,
@@ -534,6 +658,7 @@ export default function App() {
     setNodeOutputs({})
     setRuntimeInputs({})
     setAlertContext({})
+    setSessionAuthKeys({})
   }
 
   return (
@@ -671,6 +796,65 @@ export default function App() {
               ค่าสำหรับเคสปัจจุบันเท่านั้น (เชื่อม 2 ทางกับบล็อกในกราฟ และไม่เซฟลง SOP)
             </p>
 
+            {allowLiveExecution && (
+              <div className="mt-2 flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                <span className="text-[10px] font-bold text-slate-700">โหมดรัน:</span>
+                <div className="flex rounded border border-slate-300 bg-white p-0.5 text-[10px] font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setExecutionMode('sandbox')}
+                    className={`rounded px-2 py-0.5 ${
+                      executionMode === 'sandbox' ? 'bg-slate-800 text-white' : 'text-slate-600'
+                    }`}
+                  >
+                    Sandbox
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExecutionMode('live')}
+                    className={`rounded px-2 py-0.5 ${
+                      executionMode === 'live' ? 'bg-emerald-600 text-white' : 'text-slate-600'
+                    }`}
+                  >
+                    Live API
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {sessionAuthTools.length > 0 && (
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50/70 p-2">
+                <div className="text-[10px] font-bold text-amber-900 mb-1">
+                  🔑 Session API Keys (ชั่วคราว ไม่เซฟลง SOP)
+                </div>
+                <div className="space-y-1.5">
+                  {sessionAuthTools.map((t) => (
+                    <label key={`auth-${t.id}`} className="block text-[10px] font-semibold text-amber-950">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="truncate">{t.name}</span>
+                        <span className="font-mono text-[9px] font-normal text-amber-700">
+                          {t.auth?.env_var || t.auth?.key_name || t.auth?.type}
+                        </span>
+                      </div>
+                      <input
+                        type="password"
+                        value={sessionAuthKeys[t.id] || ''}
+                        placeholder={
+                          t.auth?.type === 'basic'
+                            ? 'user:password หรือ base64...'
+                            : `กรอก API Key สำหรับ ${t.name}...`
+                        }
+                        onChange={(e) =>
+                          setSessionAuthKeys((prev) => ({ ...prev, [t.id]: e.target.value }))
+                        }
+                        className="mt-0.5 w-full rounded border border-amber-300 bg-white px-1.5 py-1 font-mono text-[11px] font-normal"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {nodes.length === 0 ? (
               <div className="mt-2 rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
                 สร้างหรือโหลด SOP เพื่อแสดงช่องกรอก Input ตามบล็อก
@@ -760,6 +944,7 @@ export default function App() {
                             <label key={`block-${block.nodeId}-${field.key}`} className="block text-[10px]">
                               <div className="flex items-center justify-between gap-1 font-mono font-semibold text-slate-700">
                                 <span>
+                                  {field.isSecret ? '🔑 ' : ''}
                                   {field.key}
                                   {field.required && <span className="text-rose-600">*</span>}
                                 </span>
@@ -768,7 +953,7 @@ export default function App() {
                                 </span>
                               </div>
                               <input
-                                type="text"
+                                type={field.isSecret ? 'password' : 'text'}
                                 value={field.runtimeVal}
                                 disabled={isSkipped}
                                 placeholder={
@@ -807,7 +992,12 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleResetExecution}
-                disabled={nodes.length === 0 && Object.keys(runtimeInputs).length === 0 && Object.keys(alertContext).length === 0}
+                disabled={
+                  nodes.length === 0 &&
+                  Object.keys(runtimeInputs).length === 0 &&
+                  Object.keys(alertContext).length === 0 &&
+                  Object.keys(sessionAuthKeys).length === 0
+                }
                 className="rounded border border-slate-300 bg-white py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               >
                 ↺ รีเซ็ต / ล้างค่า
