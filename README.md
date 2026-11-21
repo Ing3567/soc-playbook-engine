@@ -5,8 +5,10 @@ Converts SOC Standard Operating Procedures (text or `.docx`) into interactive, e
 ## Architecture
 
 - **Frontend (`frontend/`)**: React 19, TypeScript, Vite, Tailwind CSS v4, `@xyflow/react` + `@dagrejs/dagre`
-- **Backend (`backend/`)**: Go (Gin + MongoDB driver), LLM parser (Ollama / Hugging Face) with indentation fallback, Sandbox & SSRF-guarded Live HTTP executors, BPMN/CACAO/Markdown exporters
-- **Database**: MongoDB 7 (`playbooks` and `tools` collections)
+- **Backend (`backend/`)**: Go (Gin + MongoDB driver), LLM parser (Ollama / Hugging Face) with indentation fallback, Sandbox & SSRF-guarded Live HTTP executors, SOC Simulation Engine (Scenarios, Server-Side Runs, Audit Log, Scoring, PBKDF2/JWT Auth), BPMN/CACAO/Markdown exporters
+- **Database**: MongoDB 7 (`playbooks`, `playbook_versions`, `tools`, `scenarios`, `users`, `runs`, `run_events`)
+
+> ดูแผนผังไฟล์ทั้งหมดและหน้าที่ของแต่ละไฟล์อย่างละเอียดได้ที่ [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ## Quick Start (Docker Compose)
 
@@ -40,7 +42,7 @@ npm run dev
 ### Running Tests
 ```bash
 cd backend && go test -v ./...
-cd frontend && npm run lint && npm run build
+cd frontend && npm run lint && npm test && npm run build
 ```
 
 ## Execution Modes & Security
