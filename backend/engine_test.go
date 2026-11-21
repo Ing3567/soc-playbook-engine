@@ -893,3 +893,157 @@ func TestSecretPathParamMaskingAndLiveSend(t *testing.T) {
 		t.Fatalf("live output leaked secret path param: %s", string(rawOut))
 	}
 }
+
+func TestScenarioValidationAndStripping(t *testing.T) {
+	if _, err := NormalizeAndValidateScenario(Scenario{Title: ""}, true); err == nil {
+		t.Fatalf("expected error for empty scenario title")
+	}
+	if _, err := NormalizeAndValidateScenario(Scenario{Title: "Bad", Difficulty: "extreme"}, true); err == nil {
+		t.Fatalf("expected error for invalid difficulty")
+	}
+	if _, err := NormalizeAndValidateScenario(Scenario{
+		Title:       "Bad GT",
+		GroundTruth: &ScenarioGroundTruth{ExpectedVerdict: "unknown"},
+	}, true); err == nil {
+		t.Fatalf("expected error for invalid ground_truth verdict")
+	}
+
+	norm, err := NormalizeAndValidateScenario(Scenario{
+		Title: "Custom Ransomware Drill",
+		ToolMocks: map[string]map[string]map[string]any{
+			"jira_ticket": {"default": {"ticket_id": "SOC-999"}},
+		},
+		GroundTruth: &ScenarioGroundTruth{ExpectedVerdict: "MALICIOUS", MaxDurationSec: 180},
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if norm.ID != "custom_ransomware_drill" || norm.Difficulty != "easy" {
+		t.Fatalf("unexpected normalized metadata: id=%q diff=%q", norm.ID, norm.Difficulty)
+	}
+	if _, ok := norm.ToolMocks["ticket"]; !ok {
+		t.Fatalf("expected legacy jira_ticket mock key to normalize to ticket")
+	}
+
+	stripped := StripScenarioAnswers(norm)
+	if stripped.GroundTruth != nil || stripped.ToolMocks != nil {
+		t.Fatalf("expected StripScenarioAnswers to hide ground_truth and tool_mocks, got %+v", stripped)
+	}
+}
+
+func TestScenarioDrivenSandboxExecution(t *testing.T) {
+	tp := FindBuiltinScenario("ssh_brute_force_tp")
+	fp := FindBuiltinScenario("internal_scanner_fp")
+	phish := FindBuiltinScenario("phishing_url_manual")
+	if tp == nil || fp == nil || phish == nil {
+		t.Fatalf("expected all 3 builtin scenarios to exist")
+	}
+
+	vtTool := DefaultBuiltinTools()[0] // virustotal
+
+	// Same step label ("ตรวจสอบ IP") produces opposite outcomes based on active scenario.
+	resTP := RunSandboxStepWithScenario(ExecutionRequest{
+		NodeID:         "n1",
+		Type:           "lookup",
+		Label:          "ตรวจสอบ IP ด้วย VirusTotal",
+		Tool:           "virustotal",
+		ScenarioID:     tp.ID,
+		RuntimeContext: map[string]any{"alert": tp.Alert},
+	}, &vtTool, tp)
+	if resTP.Status != "success" || resTP.Output["malicious_count"] != 14 || resTP.Output["scenario_match"] != "185.220.101.42" {
+		t.Fatalf("unexpected TP scenario output: %+v", resTP)
+	}
+
+	resFP := RunSandboxStepWithScenario(ExecutionRequest{
+		NodeID:         "n1",
+		Type:           "lookup",
+		Label:          "ตรวจสอบ IP ด้วย VirusTotal",
+		Tool:           "virustotal",
+		ScenarioID:     fp.ID,
+		RuntimeContext: map[string]any{"alert": fp.Alert},
+	}, &vtTool, fp)
+	if resFP.Status != "success" || resFP.Output["malicious_count"] != 0 || resFP.Output["scenario_match"] != "198.51.100.25" {
+		t.Fatalf("unexpected FP scenario output: %+v", resFP)
+	}
+
+	// Target-specific match on phishing domain vs fallback to default when querying unknown IP.
+	resDomain := RunSandboxStepWithScenario(ExecutionRequest{
+		NodeID:        "n2",
+		Type:          "lookup",
+		Label:         "ตรวจสอบ Domain",
+		Tool:          "virustotal",
+		RuntimeInputs: map[string]string{"ip": "login-verify-office365.example"},
+	}, &vtTool, phish)
+	if resDomain.Output["malicious_count"] != 9 || resDomain.Output["scenario_match"] != "login-verify-office365.example" {
+		t.Fatalf("expected domain-specific mock match, got %+v", resDomain.Output)
+	}
+
+	resFallback := RunSandboxStepWithScenario(ExecutionRequest{
+		NodeID:        "n3",
+		Type:          "lookup",
+		Label:         "ตรวจสอบ IP อื่น",
+		Tool:          "virustotal",
+		RuntimeInputs: map[string]string{"ip": "9.9.9.9"},
+	}, &vtTool, phish)
+	if resFallback.Output["malicious_count"] != 6 || resFallback.Output["scenario_match"] != "default" {
+		t.Fatalf("expected default mock fallback, got %+v", resFallback.Output)
+	}
+}
+
+func TestStructuredDecisionConditions(t *testing.T) {
+	edges := []Edge{
+		{
+			ID:        "e_high",
+			Source:    "d1",
+			Target:    "block_node",
+			Label:     "ใช่ (>5)",
+			Condition: &EdgeCondition{Field: "prev.malicious_count", Op: ">", Value: 5},
+		},
+		{
+			ID:        "e_phish",
+			Source:    "d1",
+			Target:    "ir_node",
+			Label:     "Phishing",
+			Condition: &EdgeCondition{Field: "prev.verdict", Op: "contains", Value: "phishing"},
+		},
+		{
+			ID:     "e_else",
+			Source: "d1",
+			Target: "close_node",
+			Label:  "ไม่ใช่",
+		},
+	}
+
+	pickedHigh := PickDecisionEdge(edges, map[string]any{"malicious_count": 14, "verdict": "Malicious"}, nil)
+	if pickedHigh == nil || pickedHigh.ID != "e_high" {
+		t.Fatalf("expected e_high for malicious_count=14, got %+v", pickedHigh)
+	}
+
+	pickedPhish := PickDecisionEdge(edges, map[string]any{"malicious_count": 2, "verdict": "Phishing Portal"}, nil)
+	if pickedPhish == nil || pickedPhish.ID != "e_phish" {
+		t.Fatalf("expected e_phish for phishing verdict, got %+v", pickedPhish)
+	}
+
+	pickedElse := PickDecisionEdge(edges, map[string]any{"malicious_count": 0, "verdict": "Clean"}, nil)
+	if pickedElse == nil || pickedElse.ID != "e_else" {
+		t.Fatalf("expected unconditional else branch e_else, got %+v", pickedElse)
+	}
+
+	// Alert context condition
+	alertCond := &EdgeCondition{Field: "alert.severity", Op: "==", Value: "high"}
+	if !EvaluateEdgeCondition(alertCond, nil, map[string]any{"alert": map[string]any{"severity": "high"}}) {
+		t.Fatalf("expected alert.severity == high to evaluate true")
+	}
+
+	// Legacy fallback when no structured conditions exist
+	legacyEdges := []Edge{
+		{ID: "e_yes", Source: "d2", Target: "a1", Label: "ใช่"},
+		{ID: "e_no", Source: "d2", Target: "a2", Label: "ไม่ใช่"},
+	}
+	if got := PickDecisionEdge(legacyEdges, map[string]any{"malicious_count": 0}, nil); got == nil || got.ID != "e_no" {
+		t.Fatalf("expected legacy fallback e_no for clean output, got %+v", got)
+	}
+	if got := PickDecisionEdge(legacyEdges, map[string]any{"malicious_count": 3}, nil); got == nil || got.ID != "e_yes" {
+		t.Fatalf("expected legacy fallback e_yes for malicious output, got %+v", got)
+	}
+}
