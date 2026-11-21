@@ -17,6 +17,7 @@ type AppConfig struct {
 	AllowLiveExecution bool
 	LiveAllowedHosts   []string
 	AllowedOrigins     []string
+	TrustedProxies     []string
 }
 
 var Config AppConfig
@@ -36,6 +37,7 @@ func LoadEnvConfig() {
 		AllowLiveExecution: liveFlag == "true" || liveFlag == "1" || liveFlag == "yes",
 		LiveAllowedHosts:   parseCSVEnv("LIVE_ALLOWED_HOSTS", ""),
 		AllowedOrigins:     parseCSVEnv("ALLOWED_ORIGINS", "http://localhost:5173"),
+		TrustedProxies:     parseCSVEnv("TRUSTED_PROXIES", ""),
 	}
 }
 

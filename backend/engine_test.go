@@ -790,3 +790,106 @@ func TestRateLimiterAndCORS(t *testing.T) {
 		t.Fatalf("expected bucket to refill after 2s")
 	}
 }
+
+func TestToolAuthEnvVarRestrictions(t *testing.T) {
+	blocked := []string{
+		"MONGO_URI",
+		"MONGO_INITDB_ROOT_PASSWORD",
+		"HF_TOKEN",
+		"PORT",
+		"PATH",
+		"HOME",
+		"ALLOWED_ORIGINS",
+		"AWS_SECRET_ACCESS_KEY",
+		"LLM_ENDPOINT",
+		"RANDOM_VAR",
+	}
+	for _, envName := range blocked {
+		if _, err := NormalizeAndValidateToolAuth(&ToolAuth{Type: "api_key", EnvVar: envName}); err == nil {
+			t.Fatalf("expected env_var %q to be rejected", envName)
+		}
+	}
+
+	allowed := []string{"VT_API_KEY", "JIRA_API_TOKEN", "TOOL_SHODAN", "SIEM_AUTH"}
+	for _, envName := range allowed {
+		if _, err := NormalizeAndValidateToolAuth(&ToolAuth{Type: "api_key", EnvVar: envName}); err != nil {
+			t.Fatalf("expected env_var %q to be allowed, got %v", envName, err)
+		}
+	}
+
+	// Defense in depth: even if a blocked env_var is injected directly, ResolveToolAuth & PopulateToolAuthStatus must ignore it.
+	t.Setenv("MONGO_URI", "mongodb://admin:secret@mongo:27017")
+	tampered := &ToolDefinition{
+		ID:   "tampered",
+		Auth: &ToolAuth{Type: "api_key", In: "header", KeyName: "X-Leak", EnvVar: "MONGO_URI"},
+	}
+	PopulateToolAuthStatus(tampered)
+	if tampered.AuthConfigured {
+		t.Fatalf("expected blocked env_var MONGO_URI not to report auth_configured=true")
+	}
+	resolved := ResolveToolAuth(tampered, "")
+	if resolved.Summary.Configured || resolved.headerValue != "" {
+		t.Fatalf("expected ResolveToolAuth to refuse reading blocked env_var MONGO_URI, got %+v", resolved)
+	}
+}
+
+func TestSecretPathParamMaskingAndLiveSend(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	prevLive := Config.AllowLiveExecution
+	prevClient := liveHTTPClient
+	prevValidator := validateLiveURLFunc
+	Config.AllowLiveExecution = true
+	liveHTTPClient = srv.Client()
+	validateLiveURLFunc = func(_ *url.URL, _ []string) error { return nil }
+	defer func() {
+		Config.AllowLiveExecution = prevLive
+		liveHTTPClient = prevClient
+		validateLiveURLFunc = prevValidator
+	}()
+
+	tool := &ToolDefinition{
+		ID:          "bot_webhook",
+		Name:        "Bot Webhook",
+		Category:    "action",
+		CommandType: "http-api",
+		HTTPMethod:  "POST",
+		Endpoint:    srv.URL + "/bot/{{bot_token}}/send",
+		Params: []ToolParameter{
+			{Key: "bot_token", In: "path", Mode: "dynamic", Required: true, IsSecret: true},
+		},
+	}
+
+	req := ExecutionRequest{
+		NodeID:        "n1",
+		Label:         "send alert",
+		Tool:          "bot_webhook",
+		RuntimeInputs: map[string]string{"bot_token": "super-secret-path-token"},
+	}
+
+	built := BuildToolRequest(tool, req)
+	if strings.Contains(built.URL, "super-secret-path-token") {
+		t.Fatalf("BuildToolRequest leaked secret path param in URL: %q", built.URL)
+	}
+	if built.Params["bot_token"] != "***" {
+		t.Fatalf("expected masked bot_token param, got %q", built.Params["bot_token"])
+	}
+
+	res := RunLiveHTTPStep(req, tool)
+	if res.Status != "success" {
+		t.Fatalf("expected live success, got %+v", res)
+	}
+	if gotPath != "/bot/super-secret-path-token/send" {
+		t.Fatalf("expected unmasked secret in outbound path, got %q", gotPath)
+	}
+	rawOut, _ := json.Marshal(res.Output)
+	if strings.Contains(string(rawOut), "super-secret-path-token") {
+		t.Fatalf("live output leaked secret path param: %s", string(rawOut))
+	}
+}

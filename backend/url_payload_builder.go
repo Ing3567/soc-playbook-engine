@@ -38,6 +38,7 @@ type ResolvedToolRequest struct {
 	Body            map[string]any    `json:"body,omitempty"`
 	Auth            *AuthSummary      `json:"auth,omitempty"`
 	MissingRequired []string          `json:"missing_required,omitempty"`
+	rawURL          string
 	rawHeaders      map[string]string
 	rawQuery        map[string]string
 	rawBody         map[string]any
@@ -85,7 +86,7 @@ func ResolveToolAuth(tool *ToolDefinition, runtimeAuth string) ResolvedAuth {
 
 	rawSecret := ""
 	source := "missing"
-	if envVar != "" {
+	if envVar != "" && IsAllowedToolAuthEnvVar(envVar) {
 		if envVal := strings.TrimSpace(os.Getenv(envVar)); envVal != "" {
 			rawSecret = envVal
 			source = "env"
@@ -257,6 +258,7 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 	body := make(map[string]any)
 	queryPairs := make(map[string]string)
 	pathValues := make(map[string]string)
+	rawPathValues := make(map[string]string)
 	var rawHeaders map[string]string
 	var rawQuery map[string]string
 	var rawBody map[string]any
@@ -313,7 +315,8 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 			resolvedParams[p.Key] = displayVal
 			switch p.In {
 			case "path":
-				pathValues[p.Key] = val
+				pathValues[p.Key] = displayVal
+				rawPathValues[p.Key] = val
 			case "query":
 				if val != "" {
 					queryPairs[p.Key] = displayVal
@@ -349,6 +352,7 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		resolvedParams[k] = val
 		if strings.Contains(endpoint, "{{"+k+"}}") {
 			pathValues[k] = val
+			rawPathValues[k] = val
 		} else if method == "GET" || method == "DELETE" {
 			queryPairs[k] = val
 			if rawQuery == nil {
@@ -375,6 +379,7 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		resolvedParams[k] = val
 		if strings.Contains(endpoint, "{{"+k+"}}") {
 			pathValues[k] = val
+			rawPathValues[k] = val
 		} else if method == "GET" || method == "DELETE" {
 			queryPairs[k] = val
 			if rawQuery == nil {
@@ -394,6 +399,12 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 	for k, v := range pathValues {
 		escaped := url.PathEscape(v)
 		resolvedURL = strings.ReplaceAll(resolvedURL, "{{"+k+"}}", escaped)
+	}
+
+	rawURL := endpoint
+	for k, v := range rawPathValues {
+		escaped := url.PathEscape(v)
+		rawURL = strings.ReplaceAll(rawURL, "{{"+k+"}}", escaped)
 	}
 
 	if resolvedURL != "" && len(queryPairs) > 0 {
@@ -423,6 +434,7 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		Body:            body,
 		Auth:            authSummary,
 		MissingRequired: missingRequired,
+		rawURL:          rawURL,
 		rawHeaders:      rawHeaders,
 		rawQuery:        rawQuery,
 		rawBody:         rawBody,

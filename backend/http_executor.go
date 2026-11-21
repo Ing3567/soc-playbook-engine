@@ -88,8 +88,17 @@ func newSafeLiveHTTPClient() *http.Client {
 					return nil, fmt.Errorf("blocked connection to internal/private IP %s (%s)", ip.IP.String(), host)
 				}
 			}
-			// Dial the validated IP directly to prevent DNS rebinding.
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			// Try each validated IP in order (avoids failing on IPv6-only first record when IPv4 is reachable)
+			// while still dialing the pre-validated IP directly to prevent DNS rebinding.
+			var lastErr error
+			for _, ip := range ips {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, lastErr
 		},
 	}
 	return &http.Client{
@@ -99,7 +108,7 @@ func newSafeLiveHTTPClient() *http.Client {
 			if len(via) >= 5 {
 				return fmt.Errorf("stopped after 5 redirects")
 			}
-			return validateLiveTargetURL(req.URL, Config.LiveAllowedHosts)
+			return validateLiveURLFunc(req.URL, Config.LiveAllowedHosts)
 		},
 	}
 }
@@ -172,11 +181,14 @@ func RunLiveHTTPStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionRes
 		)
 	}
 
-	// Build actual outbound URL with unmasked query params + auth query param if applicable.
-	actualURL := resolved.URL
+	// Build actual outbound URL from unmasked path + raw query params + auth query param if applicable.
+	actualURL := resolved.rawURL
+	if actualURL == "" {
+		actualURL = resolved.URL
+	}
 	parsedURL, err := url.Parse(actualURL)
 	if err != nil {
-		return fail(fmt.Sprintf("Invalid endpoint URL %q: %v", actualURL, err), map[string]any{
+		return fail(fmt.Sprintf("Invalid endpoint URL %q: %v", resolved.URL, err), map[string]any{
 			"http_method":  resolved.Method,
 			"resolved_url": resolved.URL,
 		})

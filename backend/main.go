@@ -25,6 +25,9 @@ func main() {
 	}
 
 	router := gin.Default()
+	if err := router.SetTrustedProxies(Config.TrustedProxies); err != nil {
+		log.Fatalf("Invalid TRUSTED_PROXIES config: %v", err)
+	}
 	router.Use(CORSMiddleware(Config.AllowedOrigins))
 	handler := NewApiHandler(repo, toolRepo)
 	handler.RegisterRoutes(router)

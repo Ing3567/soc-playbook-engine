@@ -348,14 +348,52 @@ func NormalizeAndValidateToolAuth(auth *ToolAuth) (*ToolAuth, error) {
 		}
 	}
 
-	if cleaned.EnvVar != "" && !envVarNameRegex.MatchString(cleaned.EnvVar) {
-		return nil, fmt.Errorf("%w: auth.env_var must match ^[A-Z][A-Z0-9_]*$ (e.g. VT_API_KEY)", ErrInvalidTool)
+	if cleaned.EnvVar != "" {
+		if !envVarNameRegex.MatchString(cleaned.EnvVar) {
+			return nil, fmt.Errorf("%w: auth.env_var must match ^[A-Z][A-Z0-9_]*$ (e.g. VT_API_KEY)", ErrInvalidTool)
+		}
+		if !IsAllowedToolAuthEnvVar(cleaned.EnvVar) {
+			return nil, fmt.Errorf("%w: auth.env_var %q is reserved or not a tool credential name (use e.g. TOOL_* or *_API_KEY / *_TOKEN)", ErrInvalidTool, cleaned.EnvVar)
+		}
 	}
 	if cleaned.EnvVar == "" && !cleaned.AllowRuntime {
 		return nil, fmt.Errorf("%w: auth requires either env_var or allow_runtime", ErrInvalidTool)
 	}
 
 	return &cleaned, nil
+}
+
+var blockedEnvVarPrefixes = []string{
+	"MONGO_", "LLM_", "HF_", "ALLOW_", "ALLOWED_", "LIVE_", "TRUSTED_",
+	"AUTH_", "AWS_", "GCP_", "GOOGLE_", "AZURE_", "GITHUB_", "GH_",
+	"SSH_", "DOCKER_", "KUBE_", "GIN_", "GO", "NODE_", "NPM_", "VITE_",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+}
+
+var blockedEnvVarNames = map[string]bool{
+	"PORT": true, "PATH": true, "HOME": true, "USER": true, "SHELL": true,
+	"PWD": true, "TERM": true, "LANG": true, "TZ": true, "HOSTNAME": true,
+}
+
+// IsAllowedToolAuthEnvVar restricts ToolAuth.EnvVar so server/infra secrets (e.g. MONGO_URI, HF_TOKEN) cannot be exfiltrated via custom tools.
+func IsAllowedToolAuthEnvVar(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if !envVarNameRegex.MatchString(name) {
+		return false
+	}
+	if blockedEnvVarNames[name] {
+		return false
+	}
+	for _, prefix := range blockedEnvVarPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return false
+		}
+	}
+	return strings.HasPrefix(name, "TOOL_") ||
+		strings.Contains(name, "_KEY") ||
+		strings.Contains(name, "_TOKEN") ||
+		strings.Contains(name, "_SECRET") ||
+		strings.Contains(name, "_AUTH")
 }
 
 func PopulateToolAuthStatus(tool *ToolDefinition) {
@@ -366,7 +404,7 @@ func PopulateToolAuthStatus(tool *ToolDefinition) {
 		tool.AuthConfigured = false
 		return
 	}
-	tool.AuthConfigured = tool.Auth.EnvVar != "" && strings.TrimSpace(os.Getenv(tool.Auth.EnvVar)) != ""
+	tool.AuthConfigured = IsAllowedToolAuthEnvVar(tool.Auth.EnvVar) && strings.TrimSpace(os.Getenv(tool.Auth.EnvVar)) != ""
 }
 
 // SanitizePlaybookForSave ensures SOP blueprints persist only fixed parameters and
