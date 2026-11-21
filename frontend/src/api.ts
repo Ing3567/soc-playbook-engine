@@ -1,4 +1,13 @@
-import type { ExecutionMode, FlowNode, FlowEdge, PlaybookItem, ToolDefinition, ToolPayload } from './types'
+import type {
+  ExecutionMode,
+  FlowNode,
+  FlowEdge,
+  PlaybookItem,
+  ScenarioItem,
+  ScenarioPayload,
+  ToolDefinition,
+  ToolPayload,
+} from './types'
 
 async function parseJsonSafe<T = Record<string, unknown>>(res: Response): Promise<T | null> {
   try {
@@ -156,11 +165,53 @@ export async function testToolDraft(
   return data
 }
 
+export async function getScenarios(hideAnswers = true): Promise<ScenarioItem[]> {
+  try {
+    const query = hideAnswers ? '?hide_answers=true' : ''
+    const res = await fetch(`/api/scenarios${query}`)
+    if (!res.ok) return []
+    const data = await parseJsonSafe<ScenarioItem[]>(res)
+    return Array.isArray(data) ? data : []
+  } catch {
+    return []
+  }
+}
+
+export async function createScenario(payload: ScenarioPayload): Promise<ScenarioItem> {
+  const res = await fetch('/api/scenarios', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const data = await parseJsonSafe<ScenarioItem & { error?: string }>(res)
+  if (!res.ok || !data) throw new Error(data?.error || `สร้าง Scenario ไม่สำเร็จ (HTTP ${res.status})`)
+  return data
+}
+
+export async function updateScenario(id: string, payload: ScenarioPayload): Promise<ScenarioItem> {
+  const res = await fetch(`/api/scenarios/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const data = await parseJsonSafe<ScenarioItem & { error?: string }>(res)
+  if (!res.ok || !data) throw new Error(data?.error || `อัปเดต Scenario ไม่สำเร็จ (HTTP ${res.status})`)
+  return data
+}
+
+export async function deleteScenario(id: string): Promise<void> {
+  const res = await fetch(`/api/scenarios/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const data = await parseJsonSafe<{ error?: string }>(res)
+    throw new Error(data?.error || `ลบ Scenario ไม่สำเร็จ (HTTP ${res.status})`)
+  }
+}
+
 export async function executeStep(
   node: FlowNode,
   runtimeContext?: Record<string, unknown>,
   runtimeInputs?: Record<string, string>,
-  options?: { runtimeAuth?: string; executionMode?: ExecutionMode }
+  options?: { runtimeAuth?: string; executionMode?: ExecutionMode; scenarioId?: string }
 ) {
   const res = await fetch('/api/execute', {
     method: 'POST',
@@ -177,6 +228,7 @@ export async function executeStep(
       runtime_context: runtimeContext,
       runtime_auth: options?.runtimeAuth || undefined,
       execution_mode: options?.executionMode || 'sandbox',
+      scenario_id: options?.scenarioId || undefined,
     }),
   })
   const data = await parseJsonSafe<{

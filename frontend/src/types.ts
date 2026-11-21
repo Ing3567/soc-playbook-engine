@@ -14,11 +14,29 @@ export interface FlowNode {
   input_payload?: Record<string, string>
 }
 
+export type ConditionOperator =
+  | '=='
+  | '!='
+  | '>'
+  | '>='
+  | '<'
+  | '<='
+  | 'contains'
+  | 'is_true'
+  | 'is_false'
+
+export interface EdgeCondition {
+  field: string
+  op: ConditionOperator
+  value?: string | number | boolean
+}
+
 export interface FlowEdge {
   id: string
   source: string
   target: string
   label?: string
+  condition?: EdgeCondition
 }
 
 export interface PlaybookItem {
@@ -90,3 +108,29 @@ export interface ToolDefinition {
 }
 
 export type ToolPayload = Omit<ToolDefinition, 'auth_configured' | 'is_builtin' | 'created_at' | 'updated_at'>
+
+export type ScenarioDifficulty = 'easy' | 'medium' | 'hard'
+export type ScenarioVerdict = 'clean' | 'suspicious' | 'malicious'
+
+export interface ScenarioGroundTruth {
+  expected_verdict: ScenarioVerdict
+  required_nodes?: string[]
+  expected_edges?: string[]
+  max_duration_sec?: number
+}
+
+export interface ScenarioItem {
+  id: string
+  title: string
+  description: string
+  difficulty: ScenarioDifficulty
+  playbook_id?: string
+  alert: Record<string, unknown>
+  tool_mocks?: Record<string, Record<string, Record<string, unknown>>>
+  ground_truth?: ScenarioGroundTruth
+  is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ScenarioPayload = Omit<ScenarioItem, 'is_builtin' | 'created_at' | 'updated_at'>

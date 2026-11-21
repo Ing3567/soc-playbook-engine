@@ -1,4 +1,4 @@
-import type { FlowEdge, FlowNode, RunStatus } from './types'
+import type { EdgeCondition, FlowEdge, FlowNode, RunStatus } from './types'
 
 export type PipelineNodeAvailability = 'ready' | 'locked' | 'skipped'
 
@@ -14,12 +14,158 @@ export interface PipelineState {
   skippedEdgeIds: Set<string>
 }
 
+export interface DecisionContext {
+  alert?: Record<string, unknown>
+  nodes?: Record<string, Record<string, unknown>>
+}
+
+function toFiniteNumber(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string') {
+    const trimmed = v.trim()
+    if (!trimmed) return null
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function isTruthyVal(v: unknown): boolean {
+  if (v == null) return false
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase()
+    return s !== '' && s !== 'false' && s !== '0' && s !== 'no'
+  }
+  if (Array.isArray(v)) return v.length > 0
+  if (typeof v === 'object') return Object.keys(v).length > 0
+  return true
+}
+
+function lookupConditionField(
+  field: string,
+  prevOutput: Record<string, unknown> | null,
+  fullCtx?: DecisionContext
+): { found: boolean; value: unknown } {
+  const path = field.trim()
+  if (!path) return { found: false, value: undefined }
+
+  if (!path.includes('.') && prevOutput && path in prevOutput) {
+    return { found: true, value: prevOutput[path] }
+  }
+
+  const root: Record<string, unknown> = {
+    ...(fullCtx?.alert ? { alert: fullCtx.alert } : {}),
+    ...(fullCtx?.nodes ? { nodes: fullCtx.nodes } : {}),
+    ...(prevOutput ? { prev: prevOutput } : {}),
+  }
+
+  let cur: unknown = root
+  for (const part of path.split('.')) {
+    if (cur == null || typeof cur !== 'object' || !(part in (cur as Record<string, unknown>))) {
+      return { found: false, value: undefined }
+    }
+    cur = (cur as Record<string, unknown>)[part]
+  }
+  return { found: true, value: cur }
+}
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a == null && b == null) return true
+  if (a == null || b == null) return false
+  if (typeof a === 'boolean') {
+    if (typeof b === 'boolean') return a === b
+    if (typeof b === 'string') return String(a) === b.trim().toLowerCase()
+  }
+  const na = toFiniteNumber(a)
+  const nb = toFiniteNumber(b)
+  if (na !== null && nb !== null) return na === nb
+  return String(a).trim().toLowerCase() === String(b).trim().toLowerCase()
+}
+
+export function evaluateEdgeCondition(
+  cond: EdgeCondition | undefined,
+  prevOutput: Record<string, unknown> | null,
+  fullCtx?: DecisionContext
+): boolean {
+  if (!cond || !cond.field.trim()) return false
+  const { found, value: actual } = lookupConditionField(cond.field, prevOutput, fullCtx)
+  const op = cond.op
+
+  switch (op) {
+    case 'is_true':
+      return found && isTruthyVal(actual)
+    case 'is_false':
+      return !found || !isTruthyVal(actual)
+    case '==':
+      return found && valuesEqual(actual, cond.value)
+    case '!=':
+      return !found ? cond.value != null : !valuesEqual(actual, cond.value)
+    case '>': {
+      const a = toFiniteNumber(actual)
+      const b = toFiniteNumber(cond.value)
+      return found && a !== null && b !== null && a > b
+    }
+    case '>=': {
+      const a = toFiniteNumber(actual)
+      const b = toFiniteNumber(cond.value)
+      return found && a !== null && b !== null && a >= b
+    }
+    case '<': {
+      const a = toFiniteNumber(actual)
+      const b = toFiniteNumber(cond.value)
+      return found && a !== null && b !== null && a < b
+    }
+    case '<=': {
+      const a = toFiniteNumber(actual)
+      const b = toFiniteNumber(cond.value)
+      return found && a !== null && b !== null && a <= b
+    }
+    case 'contains': {
+      if (!found || actual == null || cond.value == null) return false
+      const needle = String(cond.value).trim().toLowerCase()
+      if (!needle) return false
+      if (Array.isArray(actual)) {
+        return actual.some((el) => String(el).trim().toLowerCase().includes(needle))
+      }
+      return String(actual).toLowerCase().includes(needle)
+    }
+    default:
+      return false
+  }
+}
+
+export function formatEdgeCondition(cond: EdgeCondition | undefined): string {
+  if (!cond || !cond.field.trim()) return ''
+  const field = cond.field.replace(/^prev\./, '')
+  if (cond.op === 'is_true') return `${field} is true`
+  if (cond.op === 'is_false') return `${field} is false`
+  return `${field} ${cond.op} ${cond.value ?? ''}`
+}
+
 export function pickDecisionEdge(
   outEdges: FlowEdge[],
-  lastOutput: Record<string, unknown> | null
+  lastOutput: Record<string, unknown> | null,
+  fullCtx?: DecisionContext
 ): FlowEdge | undefined {
   if (outEdges.length === 0) return undefined
   if (outEdges.length === 1) return outEdges[0]
+
+  const hasStructured = outEdges.some((e) => Boolean(e.condition && e.condition.field.trim()))
+  if (hasStructured) {
+    let defaultEdge: FlowEdge | undefined
+    for (const e of outEdges) {
+      if (e.condition && e.condition.field.trim()) {
+        if (evaluateEdgeCondition(e.condition, lastOutput, fullCtx)) {
+          return e
+        }
+      } else if (!defaultEdge) {
+        defaultEdge = e
+      }
+    }
+    return defaultEdge ?? outEdges[outEdges.length - 1]
+  }
 
   const isPositive =
     lastOutput != null &&
@@ -65,7 +211,8 @@ export function computePipelineState(
   nodes: FlowNode[],
   edges: FlowEdge[],
   statuses: Record<string, RunStatus>,
-  nodeOutputs: Record<string, Record<string, unknown>>
+  nodeOutputs: Record<string, Record<string, unknown>>,
+  alertContext?: Record<string, unknown>
 ): PipelineState {
   const nodeStates: Record<string, PipelineNodeState> = {}
   const traversedEdgeIds = new Set<string>()
@@ -125,7 +272,10 @@ export function computePipelineState(
 
     if (current.type === 'decision') {
       nodeStates[id] = { availability: 'ready', upstreamOutput: lastOut }
-      const chosen = pickDecisionEdge(outEdges, lastOut)
+      const chosen = pickDecisionEdge(outEdges, lastOut, {
+        alert: alertContext,
+        nodes: nodeOutputs,
+      })
       for (const e of outEdges) {
         if (chosen && e.id === chosen.id) {
           traversedEdgeIds.add(e.id)

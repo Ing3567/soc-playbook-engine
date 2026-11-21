@@ -13,12 +13,14 @@ import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
 import type {
+  EdgeCondition,
   ExecutionMode,
   FlowNode,
   FlowEdge,
   PlaybookItem,
   RunStatus,
   ExecutionLog,
+  ScenarioItem,
   ToolDefinition,
   ToolCategory,
   PayloadMode,
@@ -31,13 +33,15 @@ import {
   executeStep,
   downloadExportFile,
   getTools,
+  getScenarios,
   getRuntimeConfig,
 } from './api'
-import { computePipelineState, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
+import { computePipelineState, formatEdgeCondition, getDownstreamNodeIds, pickDecisionEdge } from './pipeline'
 import { buildSopInputBlocks } from './runtimeParams'
 import { FlowNodeCard, type ManualVerdict } from './FlowNodeCard'
 import { ToolManagerModal } from './ToolManagerModal'
 import { LookupPayloadModal } from './LookupPayloadModal'
+import { EdgeConditionModal } from './EdgeConditionModal'
 
 const nodeTypes = { socNode: FlowNodeCard }
 
@@ -98,15 +102,19 @@ function buildGraphLayout(
     }
   })
 
-  const rfEdges: RFEdge[] = edges.map((e) => ({
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    label: e.label,
-    style: { stroke: '#64748b', strokeWidth: 2 },
-    labelStyle: { fill: '#0f172a', fontWeight: 600, fontSize: 12 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b' },
-  }))
+  const rfEdges: RFEdge[] = edges.map((e) => {
+    const condText = formatEdgeCondition(e.condition)
+    const displayLabel = condText ? (e.label ? `${e.label} (${condText})` : condText) : e.label
+    return {
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      label: displayLabel,
+      style: { stroke: '#64748b', strokeWidth: 2 },
+      labelStyle: { fill: '#0f172a', fontWeight: 600, fontSize: 12 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b' },
+    }
+  })
 
   return { rfNodes, rfEdges }
 }
@@ -121,10 +129,13 @@ export default function App() {
   const [savedList, setSavedList] = useState<PlaybookItem[]>([])
   const [tools, setTools] = useState<ToolDefinition[]>([])
   const [toolsLoadError, setToolsLoadError] = useState('')
+  const [scenarios, setScenarios] = useState<ScenarioItem[]>([])
+  const [selectedScenarioId, setSelectedScenarioId] = useState('')
   const [toolModalOpen, setToolModalOpen] = useState(false)
   const [toolModalCategory, setToolModalCategory] = useState<ToolCategory | undefined>(undefined)
   const [toolModalEditId, setToolModalEditId] = useState<string | null>(null)
   const [editingPayloadNodeId, setEditingPayloadNodeId] = useState<string | null>(null)
+  const [editingEdgeId, setEditingEdgeId] = useState<string | null>(null)
   const [alertContext, setAlertContext] = useState<Record<string, string>>({})
   const [runtimeInputs, setRuntimeInputs] = useState<Record<string, Record<string, string>>>({})
   const [sessionAuthKeys, setSessionAuthKeys] = useState<Record<string, string>>({})
@@ -141,8 +152,8 @@ export default function App() {
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
 
   const pipelineState = useMemo(
-    () => computePipelineState(nodes, edges, statuses, nodeOutputs),
-    [nodes, edges, statuses, nodeOutputs]
+    () => computePipelineState(nodes, edges, statuses, nodeOutputs, alertContext),
+    [nodes, edges, statuses, nodeOutputs, alertContext]
   )
   const sopInputData = useMemo(
     () => buildSopInputBlocks(nodes, edges, tools, runtimeInputs, alertContext),
@@ -181,6 +192,10 @@ export default function App() {
       ),
     [nodes, statuses, pipelineState]
   )
+  const activeScenario = useMemo(
+    () => scenarios.find((s) => s.id === selectedScenarioId) ?? null,
+    [scenarios, selectedScenarioId]
+  )
 
   const nodesRef = useRef<FlowNode[]>([])
   nodesRef.current = nodes
@@ -196,6 +211,8 @@ export default function App() {
   sessionAuthKeysRef.current = sessionAuthKeys
   const executionModeRef = useRef(executionMode)
   executionModeRef.current = executionMode
+  const selectedScenarioIdRef = useRef(selectedScenarioId)
+  selectedScenarioIdRef.current = selectedScenarioId
   const statusesRef = useRef(statuses)
   statusesRef.current = statuses
   const nodeOutputsRef = useRef(nodeOutputs)
@@ -237,6 +254,7 @@ export default function App() {
   useEffect(() => {
     reloadPlaybooks()
     reloadTools()
+    getScenarios(true).then(setScenarios)
     getRuntimeConfig().then((cfg) => {
       setAllowLiveExecution(cfg.allow_live_execution)
       if (!cfg.allow_live_execution) setExecutionMode('sandbox')
@@ -339,6 +357,51 @@ export default function App() {
     [setRfNodes, invalidateFromNode]
   )
 
+  const updateEdgeCondition = useCallback(
+    (edgeId: string, nextLabel: string, nextCondition?: EdgeCondition) => {
+      skipNextLayoutRef.current = true
+      const targetEdge = edgesRef.current.find((e) => e.id === edgeId)
+      if (targetEdge) {
+        invalidateFromNode(targetEdge.source, false)
+      }
+      const condText = formatEdgeCondition(nextCondition)
+      const displayLabel = condText ? (nextLabel ? `${nextLabel} (${condText})` : condText) : nextLabel
+      setEdges((prev) =>
+        prev.map((e) =>
+          e.id === edgeId
+            ? { ...e, label: nextLabel || undefined, condition: nextCondition }
+            : e
+        )
+      )
+      setRfEdges((prev) =>
+        prev.map((e) => (e.id === edgeId ? { ...e, label: displayLabel || undefined } : e))
+      )
+    },
+    [setRfEdges, invalidateFromNode]
+  )
+
+  const handleSelectScenario = useCallback(
+    (scenarioId: string) => {
+      setSelectedScenarioId(scenarioId)
+      setStatuses({})
+      setNodeOutputs({})
+      setRuntimeInputs({})
+      if (!scenarioId) {
+        return
+      }
+      const found = scenarios.find((s) => s.id === scenarioId)
+      if (!found) return
+      const nextAlert: Record<string, string> = {}
+      for (const [k, v] of Object.entries(found.alert || {})) {
+        if (v !== null && v !== undefined) {
+          nextAlert[k] = String(v)
+        }
+      }
+      setAlertContext(nextAlert)
+    },
+    [scenarios]
+  )
+
   const completeManualNode = useCallback(
     (nodeId: string, verdict: ManualVerdict, openedUrl?: string) => {
       const target = nodesRef.current.find((n) => n.id === nodeId)
@@ -412,6 +475,7 @@ export default function App() {
         const res = await executeStep(target, runtimeCtx, runtimeInputsRef.current[nodeId], {
           runtimeAuth: sessionAuthKeysRef.current[canonicalTool],
           executionMode: executionModeRef.current,
+          scenarioId: selectedScenarioIdRef.current || undefined,
         })
         const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
         setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
@@ -669,7 +733,12 @@ export default function App() {
         }
 
         const nextEdge =
-          current.type === 'decision' ? pickDecisionEdge(outEdges, lastOutput) : outEdges[0]
+          current.type === 'decision'
+            ? pickDecisionEdge(outEdges, lastOutput, {
+                alert: alertContextRef.current,
+                nodes: localOutputs as Record<string, Record<string, unknown>>,
+              })
+            : outEdges[0]
         current = nextEdge ? nodeMap.get(nextEdge.target) : undefined
       }
     } finally {
@@ -683,6 +752,7 @@ export default function App() {
     setRuntimeInputs({})
     setAlertContext({})
     setSessionAuthKeys({})
+    setSelectedScenarioId('')
   }
 
   return (
@@ -819,6 +889,43 @@ export default function App() {
             <p className="mt-1 text-[10px] text-slate-500">
               ค่าสำหรับเคสปัจจุบันเท่านั้น (เชื่อม 2 ทางกับบล็อกในกราฟ และไม่เซฟลง SOP)
             </p>
+
+            {scenarios.length > 0 && (
+              <div className="mt-2 rounded border border-indigo-200 bg-indigo-50/60 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10px] font-bold text-indigo-950">🎯 Training Scenario (โจทย์จำลอง)</span>
+                  {activeScenario && (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                        activeScenario.difficulty === 'hard'
+                          ? 'bg-rose-100 text-rose-800'
+                          : activeScenario.difficulty === 'medium'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      {activeScenario.difficulty}
+                    </span>
+                  )}
+                </div>
+                <select
+                  value={selectedScenarioId}
+                  onChange={(e) => handleSelectScenario(e.target.value)}
+                  aria-label="Training Scenario"
+                  className="w-full rounded border border-indigo-300 bg-white px-2 py-1 text-[11px] text-slate-800"
+                >
+                  <option value="">-- โหมดปกติ (ไม่ใช้ Scenario) --</option>
+                  {scenarios.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      [{s.difficulty}] {s.title}
+                    </option>
+                  ))}
+                </select>
+                {activeScenario && (
+                  <p className="text-[10px] leading-snug text-indigo-900">{activeScenario.description}</p>
+                )}
+              </div>
+            )}
 
             {allowLiveExecution && (
               <div className="mt-2 flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2 py-1">
@@ -1081,6 +1188,12 @@ export default function App() {
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
+            onEdgeClick={(_event, clickedEdge) => {
+              const sourceNode = nodesRef.current.find((n) => n.id === clickedEdge.source)
+              if (sourceNode?.type === 'decision') {
+                setEditingEdgeId(clickedEdge.id)
+              }
+            }}
             fitView
           >
             <Background gap={16} size={1} />
@@ -1141,6 +1254,14 @@ export default function App() {
           setToolModalEditId(toolId)
           setToolModalOpen(true)
         }}
+      />
+
+      <EdgeConditionModal
+        edge={edges.find((e) => e.id === editingEdgeId) ?? null}
+        sourceLabel={nodes.find((n) => n.id === edges.find((e) => e.id === editingEdgeId)?.source)?.label}
+        targetLabel={nodes.find((n) => n.id === edges.find((e) => e.id === editingEdgeId)?.target)?.label}
+        onClose={() => setEditingEdgeId(null)}
+        onSave={updateEdgeCondition}
       />
     </div>
   )
