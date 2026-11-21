@@ -3,6 +3,9 @@ import type {
   HTTPMethod,
   ParamLocation,
   PayloadMode,
+  ToolAuth,
+  ToolAuthLocation,
+  ToolAuthType,
   ToolCategory,
   ToolCommandType,
   ToolDefinition,
@@ -37,11 +40,21 @@ interface FormState {
   http_method: HTTPMethod
   endpoint: string
   payload_mode: PayloadMode
+  auth: ToolAuth
   params: ToolParameter[]
   mockRows: MockKVRow[]
   mockOutputText: string
   mockJsonMode: boolean
   enabled: boolean
+}
+
+const DEFAULT_AUTH: ToolAuth = {
+  type: 'none',
+  in: 'header',
+  key_name: '',
+  prefix: '',
+  env_var: '',
+  allow_runtime: true,
 }
 
 const EMPTY_FORM: FormState = {
@@ -54,6 +67,7 @@ const EMPTY_FORM: FormState = {
   http_method: 'GET',
   endpoint: '',
   payload_mode: 'dynamic',
+  auth: { ...DEFAULT_AUTH },
   params: [],
   mockRows: [],
   mockOutputText: '',
@@ -163,6 +177,25 @@ const QUICK_TEMPLATES: QuickTemplate[] = [
         { key: 'delivered', value: 'true' },
         { key: 'channel', value: '#soc-alerts' },
       ],
+    }),
+  },
+  {
+    id: 'manual_web_check',
+    label: 'Web Check (Anti-bot)',
+    badge: 'Manual Browser',
+    apply: () => ({
+      name: 'VirusTotal Web GUI',
+      id: 'virustotal_web',
+      category: 'lookup',
+      command_type: 'manual',
+      http_method: 'GET',
+      endpoint: 'https://www.virustotal.com/gui/ip-address/{{ip}}',
+      payload_mode: 'dynamic',
+      auth: { ...DEFAULT_AUTH },
+      keywords: ['vt web', 'เปิดเว็บ', 'manual check'],
+      description: 'Open VirusTotal web portal in browser for manual analyst inspection (avoids anti-bot)',
+      params: [{ key: 'ip', label: 'Target IP', in: 'path', mode: 'dynamic', value: '{{alert.src_ip}}', required: true }],
+      mockRows: [],
     }),
   },
 ]
@@ -292,6 +325,16 @@ function toolToFormState(tool: ToolDefinition, asClone: boolean): FormState {
     http_method: tool.http_method || (tool.category === 'lookup' ? 'GET' : 'POST'),
     endpoint: tool.endpoint || '',
     payload_mode: tool.payload_mode || 'dynamic',
+    auth: tool.auth
+      ? {
+          type: tool.auth.type || 'none',
+          in: tool.auth.in || 'header',
+          key_name: tool.auth.key_name || '',
+          prefix: tool.auth.prefix || '',
+          env_var: tool.auth.env_var || '',
+          allow_runtime: Boolean(tool.auth.allow_runtime),
+        }
+      : { ...DEFAULT_AUTH },
     params: Array.isArray(tool.params) ? tool.params.map((p) => ({ ...p })) : [],
     mockRows: objectToMockRows(tool.mock_output),
     mockOutputText:
@@ -538,6 +581,18 @@ export function ToolManagerModal({
       }))
       .filter((p) => p.key !== '')
 
+    const authPayload: ToolAuth | undefined =
+      form.command_type === 'http-api' && form.auth.type !== 'none'
+        ? {
+            type: form.auth.type,
+            in: form.auth.type === 'api_key' ? form.auth.in || 'header' : 'header',
+            key_name: (form.auth.key_name || '').trim() || undefined,
+            prefix: (form.auth.prefix || '').trim() || undefined,
+            env_var: (form.auth.env_var || '').trim().toUpperCase() || undefined,
+            allow_runtime: Boolean(form.auth.allow_runtime),
+          }
+        : { type: 'none' }
+
     return {
       id: (form.id || slugifyName(form.name)).trim(),
       name: form.name.trim(),
@@ -548,6 +603,7 @@ export function ToolManagerModal({
       http_method: form.http_method,
       endpoint: form.endpoint.trim() || undefined,
       payload_mode: form.payload_mode,
+      auth: authPayload,
       params: cleanedParams,
       mock_output: parsedMock,
       enabled: form.enabled,
@@ -586,6 +642,7 @@ export function ToolManagerModal({
         http_method: tool.http_method,
         endpoint: tool.endpoint || '',
         payload_mode: tool.payload_mode,
+        auth: tool.auth,
         params: tool.params,
         payload_template: tool.payload_template,
         mock_output: tool.mock_output,
@@ -739,6 +796,28 @@ export function ToolManagerModal({
                           >
                             {t.is_builtin ? 'Built-in' : 'Custom'}
                           </span>
+                          {t.command_type === 'manual' ? (
+                            <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-800">
+                              🌐 Browser
+                            </span>
+                          ) : t.auth && t.auth.type !== 'none' ? (
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                t.auth_configured
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                              title={
+                                t.auth_configured
+                                  ? `Configured via .env (${t.auth.env_var})`
+                                  : t.auth.env_var
+                                    ? `Env var ${t.auth.env_var} not set`
+                                    : 'Session key auth'
+                              }
+                            >
+                              {t.auth_configured ? '🔑 .env' : '🔑 Auth'}
+                            </span>
+                          ) : null}
                         </div>
                         <p className="mt-1 text-xs text-slate-600 line-clamp-2">{t.description}</p>
                         {t.endpoint && (
@@ -917,43 +996,205 @@ export function ToolManagerModal({
               </div>
             </div>
 
-            {/* Step 2: Endpoint & Smart URL Parser */}
+            {/* Step 2: Endpoint, Execution Mode & Authentication */}
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-bold text-slate-800">2. Endpoint URL & Parameters</span>
-                <button
-                  type="button"
-                  onClick={handleSyncParamsFromUrl}
-                  className="rounded border border-blue-300 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100"
-                >
-                  ⚡ แยก Params จาก URL
-                </button>
+                <span className="text-xs font-bold text-slate-800">2. Endpoint URL, โหมดการทำงาน & Authentication</span>
+                <div className="flex items-center gap-1.5">
+                  <div className="flex rounded-lg border border-slate-300 bg-white p-0.5 text-[10px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setForm((prev) => ({ ...prev, command_type: 'http-api' }))}
+                      className={`rounded px-2 py-0.5 ${
+                        form.command_type === 'http-api' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      API (http-api)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setForm((prev) => ({ ...prev, command_type: 'manual' }))}
+                      className={`rounded px-2 py-0.5 ${
+                        form.command_type === 'manual' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      🌐 เปิดเว็บตรวจเอง
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSyncParamsFromUrl}
+                    className="rounded border border-blue-300 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100"
+                  >
+                    ⚡ แยก Params จาก URL
+                  </button>
+                </div>
               </div>
 
+              {form.command_type === 'manual' && (
+                <div className="rounded border border-purple-200 bg-purple-50 px-2.5 py-1.5 text-[11px] text-purple-900">
+                  <strong>โหมดเปิดเว็บตรวจเอง (แก้ปัญหาเว็บติด Anti-bot / SSO):</strong> ใส่ URL Template ด้านล่าง เช่น{' '}
+                  <code className="font-mono">https://www.virustotal.com/gui/ip-address/{'{{ip}}'}</code>{' '}
+                  บนการ์ดโหนดจะมีปุ่มเปิดแท็บใหม่ให้ Analyst กดตรวจเองแล้วกดยืนยันผล
+                </div>
+              )}
+
               <div className="flex gap-2">
-                <select
-                  value={form.http_method}
-                  onChange={(e) => {
-                    setMethodTouched(true)
-                    setForm((prev) => ({ ...prev, http_method: e.target.value as HTTPMethod }))
-                  }}
-                  aria-label="HTTP Method"
-                  className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs font-bold text-slate-800"
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                </select>
+                {form.command_type !== 'manual' && (
+                  <select
+                    value={form.http_method}
+                    onChange={(e) => {
+                      setMethodTouched(true)
+                      setForm((prev) => ({ ...prev, http_method: e.target.value as HTTPMethod }))
+                    }}
+                    aria-label="HTTP Method"
+                    className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs font-bold text-slate-800"
+                  >
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                )}
                 <input
                   id="tool-endpoint-input"
                   type="text"
                   value={form.endpoint}
                   onChange={(e) => setForm((prev) => ({ ...prev, endpoint: e.target.value }))}
-                  placeholder="วาง URL เช่น https://api.shodan.io/shodan/host/{ip} หรือ ?ip=8.8.8.8"
+                  placeholder={
+                    form.command_type === 'manual'
+                      ? 'วาง URL หน้าเว็บ เช่น https://www.virustotal.com/gui/ip-address/{{ip}}'
+                      : 'วาง URL เช่น https://api.shodan.io/shodan/host/{ip} หรือ ?ip=8.8.8.8'
+                  }
                   className="flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs"
                 />
               </div>
+
+              {form.command_type === 'http-api' && (
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-slate-700">🔑 Authentication (อ้างอิง .env / Session Key)</span>
+                    {editingId && form.auth.type !== 'none' && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                          tools.find((t) => t.id === editingId)?.auth_configured
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {tools.find((t) => t.id === editingId)?.auth_configured
+                          ? `● พบใน .env (${form.auth.env_var})`
+                          : '○ ยังไม่พบใน .env'}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                    <label className="sm:col-span-3 text-[11px] font-semibold text-slate-600">
+                      Auth Type
+                      <select
+                        value={form.auth.type}
+                        onChange={(e) => {
+                          const nextType = e.target.value as ToolAuthType
+                          setForm((prev) => ({
+                            ...prev,
+                            auth: {
+                              ...prev.auth,
+                              type: nextType,
+                              in: nextType === 'api_key' ? prev.auth.in || 'header' : 'header',
+                              key_name:
+                                nextType === 'bearer' || nextType === 'basic'
+                                  ? 'Authorization'
+                                  : prev.auth.key_name || 'X-API-Key',
+                              prefix: nextType === 'bearer' ? 'Bearer ' : nextType === 'basic' ? 'Basic ' : '',
+                            },
+                          }))
+                        }}
+                        className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 text-xs font-normal"
+                      >
+                        <option value="none">None (ไม่ต้อง Auth)</option>
+                        <option value="api_key">API Key</option>
+                        <option value="bearer">Bearer Token</option>
+                        <option value="basic">Basic Auth</option>
+                      </select>
+                    </label>
+
+                    {form.auth.type !== 'none' && (
+                      <>
+                        {form.auth.type === 'api_key' && (
+                          <label className="sm:col-span-2 text-[11px] font-semibold text-slate-600">
+                            ตำแหน่ง
+                            <select
+                              value={form.auth.in || 'header'}
+                              onChange={(e) =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  auth: { ...prev.auth, in: e.target.value as ToolAuthLocation },
+                                }))
+                              }
+                              className="mt-0.5 w-full rounded border border-slate-300 px-1.5 py-1 text-xs font-normal"
+                            >
+                              <option value="header">header</option>
+                              <option value="query">query</option>
+                            </select>
+                          </label>
+                        )}
+                        <label
+                          className={`${form.auth.type === 'api_key' ? 'sm:col-span-3' : 'sm:col-span-4'} text-[11px] font-semibold text-slate-600`}
+                        >
+                          Key / Header Name
+                          <input
+                            type="text"
+                            value={form.auth.key_name || ''}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                auth: { ...prev.auth, key_name: e.target.value },
+                              }))
+                            }
+                            placeholder={form.auth.type === 'api_key' ? 'x-apikey' : 'Authorization'}
+                            className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs font-normal"
+                          />
+                        </label>
+                        <label
+                          className={`${form.auth.type === 'api_key' ? 'sm:col-span-4' : 'sm:col-span-5'} text-[11px] font-semibold text-slate-600`}
+                        >
+                          Env Var Name (.env)
+                          <input
+                            type="text"
+                            value={form.auth.env_var || ''}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                auth: { ...prev.auth, env_var: e.target.value.toUpperCase() },
+                              }))
+                            }
+                            placeholder="VT_API_KEY"
+                            className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs font-normal"
+                          />
+                        </label>
+                      </>
+                    )}
+                  </div>
+
+                  {form.auth.type !== 'none' && (
+                    <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(form.auth.allow_runtime)}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            auth: { ...prev.auth, allow_runtime: e.target.checked },
+                          }))
+                        }
+                        className="accent-blue-600"
+                      />
+                      อนุญาตให้กรอก API Key ชั่วคราวตอนรัน (Session Key — ไม่บันทึกลงฐานข้อมูล)
+                    </label>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center justify-between pt-1">
                 <span className="text-[11px] font-semibold text-slate-600">

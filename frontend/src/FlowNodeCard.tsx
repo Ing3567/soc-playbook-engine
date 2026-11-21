@@ -1,7 +1,9 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { PayloadMode, RunStatus, ToolDefinition, ToolSource } from './types'
 import type { PipelineNodeAvailability } from './pipeline'
-import { getNodeParamItems } from './runtimeParams'
+import { buildNodeResolvedUrl, getNodeParamItems } from './runtimeParams'
+
+export type ManualVerdict = 'clean' | 'malicious' | 'done'
 
 export function FlowNodeCard({ data }: NodeProps) {
   const nodeType = String(data.type || 'action')
@@ -14,6 +16,7 @@ export function FlowNodeCard({ data }: NodeProps) {
   const inputPayload = (data.input_payload as Record<string, string> | undefined) || {}
   const nodeRuntimeInputs = (data.runtimeInputs as Record<string, string> | undefined) || {}
   const sharedAlertContext = (data.alertContext as Record<string, string> | undefined) || {}
+  const sessionAuthKeys = (data.sessionAuthKeys as Record<string, string> | undefined) || {}
   const status = (data.status as RunStatus) || 'idle'
   const pipelineAvailability = (data.pipelineAvailability as PipelineNodeAvailability | undefined) || 'ready'
   const lockedReason = (data.lockedReason as string | undefined) || ''
@@ -21,6 +24,7 @@ export function FlowNodeCard({ data }: NodeProps) {
     ? (data.availableTools as ToolDefinition[])
     : []
   const onRun = data.onRun as (() => void) | undefined
+  const onManualComplete = data.onManualComplete as ((verdict: ManualVerdict, openedUrl?: string) => void) | undefined
   const onChangeTool = data.onChangeTool as ((nextTool: string) => void) | undefined
   const onEditPayload = data.onEditPayload as (() => void) | undefined
   const onCreateTool = data.onCreateTool as ((category: 'lookup' | 'action') => void) | undefined
@@ -53,6 +57,8 @@ export function FlowNodeCard({ data }: NodeProps) {
   const toolDisplay = matchedTool ? matchedTool.name : tool === 'ticket' ? 'Ticket' : tool
   const manualOptionId = nodeType === 'lookup' ? 'manual_lookup' : 'manual_action'
   const selectableTools = availableTools.filter((t) => t.enabled && t.category === nodeType)
+  const isManualMode =
+    canRun && (matchedTool?.command_type === 'manual' || tool === 'manual_lookup' || tool === 'manual_action')
 
   let sourceLabel = ''
   let sourceBadgeStyle = ''
@@ -80,6 +86,17 @@ export function FlowNodeCard({ data }: NodeProps) {
     sharedAlertContext
   )
 
+  const resolvedBrowserUrl = isManualMode ? buildNodeResolvedUrl(matchedTool, paramItems) : ''
+  const hasOpenableUrl = /^https?:\/\//i.test(resolvedBrowserUrl)
+
+  const requiresApiAuth =
+    canRun &&
+    !isManualMode &&
+    matchedTool?.command_type === 'http-api' &&
+    Boolean(matchedTool.auth && matchedTool.auth.type && matchedTool.auth.type !== 'none')
+  const hasEnvAuth = Boolean(matchedTool?.auth_configured)
+  const hasSessionAuth = Boolean(matchedTool?.auth?.allow_runtime && (sessionAuthKeys[tool] || '').trim() !== '')
+
   const isSkipped = pipelineAvailability === 'skipped'
   const isLocked = pipelineAvailability === 'locked'
 
@@ -96,6 +113,34 @@ export function FlowNodeCard({ data }: NodeProps) {
           {isSkipped && (
             <span className="rounded bg-slate-500 px-1 py-0.5 text-[8px] leading-none font-bold text-white">
               SKIPPED
+            </span>
+          )}
+          {isManualMode && (
+            <span
+              className="rounded bg-purple-600 px-1 py-0.5 text-[8px] leading-none font-bold text-white"
+              title="เปิดเว็บตรวจเองและกดยืนยันผล"
+            >
+              🌐 MANUAL
+            </span>
+          )}
+          {requiresApiAuth && (
+            <span
+              className={`rounded px-1 py-0.5 text-[8px] leading-none font-bold ${
+                hasEnvAuth
+                  ? 'bg-emerald-600 text-white'
+                  : hasSessionAuth
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-amber-500 text-white'
+              }`}
+              title={
+                hasEnvAuth
+                  ? `Auth พร้อมใช้งานผ่าน .env (${matchedTool?.auth?.env_var})`
+                  : hasSessionAuth
+                    ? 'Auth พร้อมใช้งานผ่าน Session Key'
+                    : `ยังไม่ได้ตั้งค่า Auth (${matchedTool?.auth?.env_var || 'Session Key'})`
+              }
+            >
+              {hasEnvAuth ? '🔑 .env' : hasSessionAuth ? '🔑 Session' : '🔑 Missing'}
             </span>
           )}
         </div>
@@ -123,7 +168,7 @@ export function FlowNodeCard({ data }: NodeProps) {
                 e.stopPropagation()
                 onEditPayload?.()
               }}
-              title={`คลิกเพื่อแก้ไข ${tag.location} (${tag.mode}): ${tag.key}=${tag.blueprintVal || '(empty)'}`}
+              title={`คลิกเพื่อแก้ไข ${tag.location} (${tag.mode}): ${tag.key}=${tag.isSecret ? '***' : tag.blueprintVal || '(empty)'}`}
               className={`nodrag nopan cursor-pointer inline-flex items-center gap-1 max-w-full rounded px-1.5 py-0.5 text-[9px] font-mono border hover:brightness-95 ${
                 tag.isPipeTemplate
                   ? 'bg-violet-50 border-violet-300 text-violet-900'
@@ -132,7 +177,7 @@ export function FlowNodeCard({ data }: NodeProps) {
             >
               <span className="font-bold opacity-75">{tag.location}</span>
               <span className="truncate max-w-[140px]">
-                {tag.key}={tag.blueprintVal || '?'}
+                {tag.key}={tag.isSecret ? '***' : tag.blueprintVal || '?'}
               </span>
               <span
                 className={`rounded px-1 text-[8px] font-bold uppercase ${
@@ -156,11 +201,12 @@ export function FlowNodeCard({ data }: NodeProps) {
                   className="shrink-0 rounded bg-white/80 border border-slate-300 px-1 py-0.5 font-mono text-[9px] font-bold text-slate-700"
                   title={`${item.location} (กรอกตอนรัน ไม่เซฟลง SOP)`}
                 >
+                  {item.isSecret ? '🔑 ' : ''}
                   {item.key}
                   {item.required && <span className="text-rose-600">*</span>}
                 </span>
                 <input
-                  type="text"
+                  type={item.isSecret ? 'password' : 'text'}
                   value={item.runtimeVal}
                   disabled={isSkipped}
                   onPointerDown={(e) => e.stopPropagation()}
@@ -180,6 +226,67 @@ export function FlowNodeCard({ data }: NodeProps) {
               </div>
             )
           })}
+        </div>
+      )}
+
+      {isManualMode && !isLocked && !isSkipped && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1 no-print">
+          {hasOpenableUrl && (
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                window.open(resolvedBrowserUrl, '_blank', 'noopener,noreferrer')
+              }}
+              title={`เปิดเว็บตรวจเอง: ${resolvedBrowserUrl}`}
+              className="nodrag nopan rounded border border-purple-400 bg-purple-50 px-1.5 py-0.5 text-[10px] font-bold text-purple-800 hover:bg-purple-100"
+            >
+              ↗ เปิดเว็บ
+            </button>
+          )}
+          {nodeType === 'lookup' ? (
+            <>
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onManualComplete?.('clean', hasOpenableUrl ? resolvedBrowserUrl : undefined)
+                }}
+                className="nodrag nopan rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-emerald-700"
+              >
+                ✓ ปกติ
+              </button>
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onManualComplete?.('malicious', hasOpenableUrl ? resolvedBrowserUrl : undefined)
+                }}
+                className="nodrag nopan rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-rose-700"
+              >
+                ⚠ เสี่ยง
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onManualComplete?.('done', hasOpenableUrl ? resolvedBrowserUrl : undefined)
+              }}
+              className="nodrag nopan rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white hover:bg-emerald-700"
+            >
+              ✓ ทำแล้ว
+            </button>
+          )}
         </div>
       )}
 
@@ -236,39 +343,41 @@ export function FlowNodeCard({ data }: NodeProps) {
                 ⚙ Payload
               </button>
             )}
-            <button
-              type="button"
-              disabled={isLocked || isSkipped || status === 'running'}
-              title={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
-              aria-label={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation()
-                if (!isLocked && !isSkipped && status !== 'running') {
-                  onRun?.()
-                }
-              }}
-              className={`nodrag nopan shrink-0 rounded py-0.5 text-[10px] font-semibold ${
-                isLocked || isSkipped
-                  ? 'px-1.5 bg-slate-200 text-slate-500 cursor-not-allowed'
-                  : status === 'failed'
-                    ? 'px-2 bg-rose-600 text-white hover:bg-rose-700'
-                    : status === 'success'
-                      ? 'px-2 bg-emerald-600 text-white hover:bg-emerald-700'
-                      : 'px-2 bg-blue-600 text-white hover:bg-blue-700'
-              }`}
-            >
-              {isSkipped || isLocked
-                ? '🔒'
-                : status === 'running'
-                  ? 'Running...'
-                  : status === 'success'
-                    ? '↻ Re-run'
+            {(!isManualMode || isLocked || isSkipped) && (
+              <button
+                type="button"
+                disabled={isLocked || isSkipped || status === 'running'}
+                title={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
+                aria-label={isLocked || isSkipped ? lockedReason || (isSkipped ? 'ข้ามกิ่ง' : 'รอโหนดบน') : undefined}
+                onPointerDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (!isLocked && !isSkipped && status !== 'running') {
+                    onRun?.()
+                  }
+                }}
+                className={`nodrag nopan shrink-0 rounded py-0.5 text-[10px] font-semibold ${
+                  isLocked || isSkipped
+                    ? 'px-1.5 bg-slate-200 text-slate-500 cursor-not-allowed'
                     : status === 'failed'
-                      ? '↻ Retry'
-                      : '▶ Run'}
-            </button>
+                      ? 'px-2 bg-rose-600 text-white hover:bg-rose-700'
+                      : status === 'success'
+                        ? 'px-2 bg-emerald-600 text-white hover:bg-emerald-700'
+                        : 'px-2 bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                {isSkipped || isLocked
+                  ? '🔒'
+                  : status === 'running'
+                    ? 'Running...'
+                    : status === 'success'
+                      ? '↻ Re-run'
+                      : status === 'failed'
+                        ? '↻ Retry'
+                        : '▶ Run'}
+              </button>
+            )}
           </div>
         </div>
       )}
