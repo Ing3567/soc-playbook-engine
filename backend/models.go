@@ -144,3 +144,98 @@ type ToolDefinition struct {
 	CreatedAt       time.Time       `json:"created_at" bson:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at" bson:"updated_at"`
 }
+
+type UserDocument struct {
+	ID           string    `json:"id" bson:"_id"`
+	Username     string    `json:"username" bson:"username"`
+	DisplayName  string    `json:"display_name" bson:"display_name"`
+	Role         string    `json:"role" bson:"role"`
+	PasswordHash string    `json:"-" bson:"password_hash"`
+	CreatedAt    time.Time `json:"created_at" bson:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" bson:"updated_at"`
+}
+
+type AuthClaims struct {
+	UserID      string `json:"sub"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+	Exp         int64  `json:"exp"`
+}
+
+type RunScore struct {
+	Total            int      `json:"total" bson:"total"`
+	VerdictPoints    int      `json:"verdict_points" bson:"verdict_points"`
+	CoveragePoints   int      `json:"coverage_points" bson:"coverage_points"`
+	PathPoints       int      `json:"path_points" bson:"path_points"`
+	SpeedPoints      int      `json:"speed_points" bson:"speed_points"`
+	DurationSec      int      `json:"duration_sec" bson:"duration_sec"`
+	MaxDurationSec   int      `json:"max_duration_sec,omitempty" bson:"max_duration_sec,omitempty"`
+	ExpectedVerdict  string   `json:"expected_verdict,omitempty" bson:"expected_verdict,omitempty"`
+	SubmittedVerdict string   `json:"submitted_verdict" bson:"submitted_verdict"`
+	MissedNodes      []string `json:"missed_nodes,omitempty" bson:"missed_nodes,omitempty"`
+	MissedEdges      []string `json:"missed_edges,omitempty" bson:"missed_edges,omitempty"`
+	Feedback         []string `json:"feedback" bson:"feedback"`
+}
+
+type SimulationRun struct {
+	ID             string                    `json:"id" bson:"_id"`
+	ScenarioID     string                    `json:"scenario_id,omitempty" bson:"scenario_id,omitempty"`
+	ScenarioTitle  string                    `json:"scenario_title,omitempty" bson:"scenario_title,omitempty"`
+	PlaybookID     string                    `json:"playbook_id,omitempty" bson:"playbook_id,omitempty"`
+	PlaybookTitle  string                    `json:"playbook_title" bson:"playbook_title"`
+	Nodes          []Node                    `json:"nodes" bson:"nodes"`
+	Edges          []Edge                    `json:"edges" bson:"edges"`
+	Alert          map[string]any            `json:"alert,omitempty" bson:"alert,omitempty"`
+	TraineeID      string                    `json:"trainee_id" bson:"trainee_id"`
+	TraineeName    string                    `json:"trainee_name" bson:"trainee_name"`
+	Mode           string                    `json:"mode" bson:"mode"`
+	Status         string                    `json:"status" bson:"status"`
+	NodeStatuses   map[string]string         `json:"node_statuses" bson:"node_statuses"`
+	NodeOutputs    map[string]map[string]any `json:"node_outputs" bson:"node_outputs"`
+	TraversedEdges []string                  `json:"traversed_edges,omitempty" bson:"traversed_edges,omitempty"`
+	FinalVerdict   string                    `json:"final_verdict,omitempty" bson:"final_verdict,omitempty"`
+	Summary        string                    `json:"summary,omitempty" bson:"summary,omitempty"`
+	Score          *RunScore                 `json:"score,omitempty" bson:"score,omitempty"`
+	StartedAt      time.Time                 `json:"started_at" bson:"started_at"`
+	CompletedAt    *time.Time                `json:"completed_at,omitempty" bson:"completed_at,omitempty"`
+	UpdatedAt      time.Time                 `json:"updated_at" bson:"updated_at"`
+}
+
+type RunEvent struct {
+	ID         string         `json:"id" bson:"_id"`
+	RunID      string         `json:"run_id" bson:"run_id"`
+	Seq        int            `json:"seq" bson:"seq"`
+	NodeID     string         `json:"node_id,omitempty" bson:"node_id,omitempty"`
+	NodeLabel  string         `json:"node_label,omitempty" bson:"node_label,omitempty"`
+	Action     string         `json:"action" bson:"action"`
+	Status     string         `json:"status,omitempty" bson:"status,omitempty"`
+	Input      map[string]any `json:"input,omitempty" bson:"input,omitempty"`
+	Output     map[string]any `json:"output,omitempty" bson:"output,omitempty"`
+	Verdict    string         `json:"verdict,omitempty" bson:"verdict,omitempty"`
+	Notes      string         `json:"notes,omitempty" bson:"notes,omitempty"`
+	DurationMs int64          `json:"duration_ms,omitempty" bson:"duration_ms,omitempty"`
+	Timestamp  time.Time      `json:"timestamp" bson:"timestamp"`
+}
+
+type StartRunRequest struct {
+	PlaybookID    string         `json:"playbook_id,omitempty"`
+	PlaybookTitle string         `json:"playbook_title,omitempty"`
+	ScenarioID    string         `json:"scenario_id,omitempty"`
+	Nodes         []Node         `json:"nodes,omitempty"`
+	Edges         []Edge         `json:"edges,omitempty"`
+	Alert         map[string]any `json:"alert,omitempty"`
+	Mode          string         `json:"mode,omitempty"`
+}
+
+type RunStepRequest struct {
+	RuntimeInputs map[string]string `json:"runtime_inputs,omitempty"`
+	RuntimeAuth   string            `json:"runtime_auth,omitempty"`
+	ManualVerdict string            `json:"manual_verdict,omitempty"`
+	Notes         string            `json:"notes,omitempty"`
+}
+
+type CompleteRunRequest struct {
+	FinalVerdict string `json:"final_verdict"`
+	Summary      string `json:"summary,omitempty"`
+}

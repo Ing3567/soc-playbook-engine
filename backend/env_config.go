@@ -18,6 +18,12 @@ type AppConfig struct {
 	LiveAllowedHosts   []string
 	AllowedOrigins     []string
 	TrustedProxies     []string
+	AuthEnabled        bool
+	AuthSecret         string
+	SeedInstructorUser string
+	SeedInstructorPass string
+	SeedTraineeUser    string
+	SeedTraineePass    string
 }
 
 var Config AppConfig
@@ -26,6 +32,7 @@ func LoadEnvConfig() {
 	readDotEnvFile(".env")
 	readDotEnvFile("../.env")
 	liveFlag := strings.ToLower(getEnvOrDefault("ALLOW_LIVE_EXECUTION", "false"))
+	authFlag := strings.ToLower(getEnvOrDefault("AUTH_ENABLED", "false"))
 	Config = AppConfig{
 		Port:               getEnvOrDefault("PORT", "8080"),
 		MongoURI:           getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
@@ -38,6 +45,12 @@ func LoadEnvConfig() {
 		LiveAllowedHosts:   parseCSVEnv("LIVE_ALLOWED_HOSTS", ""),
 		AllowedOrigins:     parseCSVEnv("ALLOWED_ORIGINS", "http://localhost:5173"),
 		TrustedProxies:     parseCSVEnv("TRUSTED_PROXIES", ""),
+		AuthEnabled:        authFlag == "true" || authFlag == "1" || authFlag == "yes",
+		AuthSecret:         getEnvOrDefault("AUTH_SECRET", ""),
+		SeedInstructorUser: getEnvOrDefault("SEED_INSTRUCTOR_USER", "instructor"),
+		SeedInstructorPass: getEnvOrDefault("SEED_INSTRUCTOR_PASS", "instructor123"),
+		SeedTraineeUser:    getEnvOrDefault("SEED_TRAINEE_USER", "trainee"),
+		SeedTraineePass:    getEnvOrDefault("SEED_TRAINEE_PASS", "trainee123"),
 	}
 }
 
