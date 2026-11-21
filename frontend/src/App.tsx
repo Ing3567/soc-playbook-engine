@@ -911,7 +911,7 @@ export default function App() {
           break
         }
 
-        const nextEdge =
+        const nextEdge: FlowEdge | undefined =
           current.type === 'decision'
             ? pickDecisionEdge(outEdges, lastOutput, {
                 alert: alertContextRef.current,
