@@ -18,7 +18,9 @@ import (
 
 var (
 	ipv4ExtractRegex   = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	ipv4ExactRegex     = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 	hashExtractRegex   = regexp.MustCompile(`\b[a-fA-F0-9]{32,64}\b`)
+	hashExactRegex     = regexp.MustCompile(`^[a-fA-F0-9]{32,64}$`)
 	domainExtractRegex = regexp.MustCompile(`\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b`)
 	templateVarRegex   = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}`)
 )
@@ -26,7 +28,6 @@ var (
 func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult {
 	start := time.Now()
 	req.Tool = NormalizeToolID(req.Tool)
-	vars := extractExecutionVars(req)
 
 	toolCfg, exists := GetToolConfigByID(req.Tool)
 	if !exists {
@@ -35,6 +36,8 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 		return res
 	}
 
+	vars, secrets := extractExecutionVarsWithSecrets(req, toolCfg)
+
 	if !toolCfg.Enabled {
 		if toolCfg.FallbackToSandbox {
 			return withSandboxFallback(req, fmt.Sprintf("Tool '%s' is disabled in tools_config.go", toolCfg.ID))
@@ -42,14 +45,15 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 		return buildFailedExecutionResult(req, start, "real", fmt.Sprintf("Tool '%s' is disabled", toolCfg.ID))
 	}
 
-	// Custom Go handler (e.g. Internal Mockup Ticket Search / Ticket System or custom integration)
-	if toolCfg.CustomExecute != nil && len(toolCfg.RequiredEnv) == 0 {
+	// Tools with zero required env/inputs (e.g. Internal Mockup Ticket Search / Ticket System)
+	if toolCfg.CustomExecute != nil && len(toolCfg.RequiredEnv) == 0 && len(toolCfg.RequiredInputs) == 0 {
 		out, mode, err := toolCfg.CustomExecute(ctx, toolCfg, req, vars)
 		if err != nil {
+			safeErr := redactSecrets(err.Error(), secrets)
 			if toolCfg.FallbackToSandbox {
-				return withSandboxFallback(req, err.Error())
+				return withSandboxFallback(req, safeErr)
 			}
-			return buildFailedExecutionResult(req, start, mode, err.Error())
+			return buildFailedExecutionResult(req, start, mode, safeErr)
 		}
 		if mode == "" {
 			mode = "real"
@@ -60,7 +64,7 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 			Mode:       mode,
 			DurationMs: time.Since(start).Milliseconds(),
 			Timestamp:  time.Now().Format("15:04:05"),
-			Output:     out,
+			Output:     redactSecretsInValue(out, secrets).(map[string]any),
 		}
 	}
 
@@ -76,11 +80,16 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 	var missingInputs []string
 	for _, reqKey := range toolCfg.RequiredInputs {
 		if strings.TrimSpace(vars[reqKey]) == "" {
-			missingInputs = append(missingInputs, reqKey)
+			envHint := findEnvFallbackForKey(toolCfg, reqKey)
+			if envHint != "" {
+				missingInputs = append(missingInputs, fmt.Sprintf("%s (กรอกในช่อง Node หรือตั้ง %s ใน .env)", reqKey, envHint))
+			} else {
+				missingInputs = append(missingInputs, reqKey)
+			}
 		}
 	}
 	if len(missingInputs) > 0 {
-		reason := fmt.Sprintf("Missing required runtime input (%s) — provide in Run Inputs or node text/link", strings.Join(missingInputs, ", "))
+		reason := fmt.Sprintf("Missing required input: %s", strings.Join(missingInputs, ", "))
 		if toolCfg.FallbackToSandbox {
 			return withSandboxFallback(req, reason)
 		}
@@ -99,7 +108,13 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 	}
 
 	if err != nil {
-		return buildFailedExecutionResult(req, start, mode, err.Error())
+		return buildFailedExecutionResult(req, start, mode, redactSecrets(err.Error(), secrets))
+	}
+
+	if output != nil {
+		if sanitized, ok := redactSecretsInValue(output, secrets).(map[string]any); ok {
+			output = sanitized
+		}
 	}
 
 	return ExecutionResult{
@@ -110,6 +125,18 @@ func ExecuteToolStep(ctx context.Context, req ExecutionRequest) ExecutionResult 
 		Timestamp:  time.Now().Format("15:04:05"),
 		Output:     output,
 	}
+}
+
+func findEnvFallbackForKey(tool *ToolConfig, key string) string {
+	if tool == nil {
+		return ""
+	}
+	for _, f := range tool.InputFields {
+		if strings.EqualFold(f.Key, key) {
+			return f.EnvFallback
+		}
+	}
+	return ""
 }
 
 func withSandboxFallback(req ExecutionRequest, reason string) ExecutionResult {
@@ -239,6 +266,11 @@ func truncateRunes(s string, maxRunes int) string {
 }
 
 func extractExecutionVars(req ExecutionRequest) map[string]string {
+	vars, _ := extractExecutionVarsWithSecrets(req, nil)
+	return vars
+}
+
+func extractExecutionVarsWithSecrets(req ExecutionRequest, tool *ToolConfig) (map[string]string, []string) {
 	vars := map[string]string{
 		"label":   strings.TrimSpace(req.Label),
 		"node_id": strings.TrimSpace(req.NodeID),
@@ -276,7 +308,7 @@ func extractExecutionVars(req ExecutionRequest) map[string]string {
 		}
 	}
 
-	// 3. Explicit runtime inputs override auto-detected values
+	// 3. Explicit per-node UI inputs override auto-detected values (UI takes priority BEFORE .env!)
 	for k, v := range req.Inputs {
 		cleanKey := strings.ToLower(strings.TrimSpace(k))
 		cleanVal := strings.TrimSpace(v)
@@ -285,7 +317,90 @@ func extractExecutionVars(req ExecutionRequest) map[string]string {
 		}
 	}
 
-	return vars
+	// 4. Cross-populate target / ip / query aliases so a single search box works seamlessly
+	if vars["target"] == "" {
+		switch {
+		case vars["ip"] != "":
+			vars["target"] = vars["ip"]
+		case vars["hash"] != "":
+			vars["target"] = vars["hash"]
+		case vars["domain"] != "":
+			vars["target"] = vars["domain"]
+		case vars["query"] != "":
+			vars["target"] = vars["query"]
+		}
+	}
+	if vars["ip"] == "" {
+		if ip := ipv4ExtractRegex.FindString(vars["target"]); ip != "" {
+			vars["ip"] = ip
+		} else if ip := ipv4ExtractRegex.FindString(vars["query"]); ip != "" {
+			vars["ip"] = ip
+		}
+	}
+	if vars["query"] == "" {
+		if vars["target"] != "" {
+			vars["query"] = vars["target"]
+		} else if vars["ip"] != "" {
+			vars["query"] = vars["ip"]
+		}
+	}
+
+	// 5. Env fallback ONLY when the user left the node UI field blank + collect sensitive secrets
+	var secrets []string
+	if tool != nil {
+		for _, field := range tool.InputFields {
+			key := strings.ToLower(strings.TrimSpace(field.Key))
+			if vars[key] == "" && field.EnvFallback != "" {
+				if envVal := strings.TrimSpace(os.Getenv(field.EnvFallback)); envVal != "" {
+					vars[key] = envVal
+				}
+			}
+			if (field.Type == "password" || field.EnvFallback != "") && vars[key] != "" {
+				secrets = append(secrets, vars[key])
+			}
+		}
+		for _, envKey := range tool.RequiredEnv {
+			if envVal := strings.TrimSpace(os.Getenv(envKey)); envVal != "" && !strings.HasPrefix(envVal, "http://") && !strings.HasPrefix(envVal, "https://") {
+				secrets = append(secrets, envVal)
+			}
+		}
+	}
+
+	return vars, secrets
+}
+
+func redactSecrets(text string, secrets []string) string {
+	out := text
+	for _, s := range secrets {
+		if len(s) >= 4 {
+			out = strings.ReplaceAll(out, s, "***REDACTED***")
+		}
+	}
+	return out
+}
+
+func redactSecretsInValue(v any, secrets []string) any {
+	if len(secrets) == 0 {
+		return v
+	}
+	switch typed := v.(type) {
+	case string:
+		return redactSecrets(typed, secrets)
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, val := range typed {
+			out[k] = redactSecretsInValue(val, secrets)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, val := range typed {
+			out[i] = redactSecretsInValue(val, secrets)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func substituteEndpointVars(template string, vars map[string]string) string {
@@ -306,7 +421,11 @@ func substituteEndpointVars(template string, vars map[string]string) string {
 				val = strings.TrimRight(val, "/")
 			}
 		} else if raw, ok := vars[strings.ToLower(key)]; ok {
-			val = url.PathEscape(raw)
+			if m[0] == 0 && (strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://")) {
+				val = raw
+			} else {
+				val = url.PathEscape(raw)
+			}
 		}
 		sb.WriteString(val)
 		lastIdx = m[1]
@@ -374,33 +493,52 @@ func RunSandboxStep(req ExecutionRequest) ExecutionResult {
 	start := time.Now()
 	time.Sleep(250 * time.Millisecond)
 
+	vars := extractExecutionVars(req)
 	canonicalTool := NormalizeToolID(req.Tool)
 	var output map[string]any
 	switch canonicalTool {
 	case "virustotal":
+		target := vars["target"]
+		if target == "" {
+			target = "185.220.101.42"
+		}
 		output = map[string]any{
 			"tool":            "VirusTotal API Sandbox",
 			"step":            req.Label,
+			"target":          target,
 			"malicious_count": 12,
-			"verdict":         "Malicious IP Confirmed",
+			"verdict":         "Malicious Indicator Confirmed",
 		}
 	case "abuseipdb":
+		ip := vars["ip"]
+		if ip == "" {
+			ip = "185.220.101.42"
+		}
 		output = map[string]any{
 			"tool":             "AbuseIPDB Sandbox",
 			"step":             req.Label,
+			"ip":               ip,
 			"confidence_score": 85,
 			"verdict":          "Suspicious Source",
 		}
-	case "splunk":
-		query := "search index=main | head 20"
-		for _, l := range req.Links {
-			if strings.TrimSpace(l.SplunkQuery) != "" {
-				query = l.SplunkQuery
-				break
-			}
+	case "shodan":
+		query := vars["query"]
+		if query == "" {
+			query = "185.220.101.42"
 		}
-		if q := strings.TrimSpace(req.Inputs["query"]); q != "" {
-			query = q
+		output = map[string]any{
+			"tool":       "Shodan API Sandbox",
+			"step":       req.Label,
+			"query":      query,
+			"org":        "Example Hosting ASN",
+			"open_ports": []int{22, 80, 443, 8080},
+			"vulns":      []string{"CVE-2023-38408"},
+			"verdict":    "Exposed Services Detected",
+		}
+	case "splunk":
+		query := vars["query"]
+		if query == "" {
+			query = "search index=main | head 20"
 		}
 		output = map[string]any{
 			"tool":          "Splunk SIEM Sandbox",
@@ -410,16 +548,17 @@ func RunSandboxStep(req ExecutionRequest) ExecutionResult {
 			"verdict":       "Suspicious Events Found",
 		}
 	case "ticket_search":
-		output = searchInternalMockupTickets(req, extractExecutionVars(req))
+		output = searchInternalMockupTickets(req, vars)
 	case "firewall_block":
 		output = map[string]any{
 			"tool":    "Firewall Controller",
 			"step":    req.Label,
+			"ip":      vars["ip"],
 			"rule_id": fmt.Sprintf("FW-%d", time.Now().Unix()%10000),
 			"result":  "Blocked Successfully",
 		}
 	case "ticket":
-		output = createInternalMockupTicket(req, extractExecutionVars(req))
+		output = createInternalMockupTicket(req, vars)
 	default:
 		output = map[string]any{
 			"tool":   "Manual SOC Procedure",

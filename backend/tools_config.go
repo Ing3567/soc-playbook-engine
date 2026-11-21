@@ -16,30 +16,33 @@ import (
 // ไฟล์นี้เป็นศูนย์กลางเดียวสำหรับการเพิ่ม แก้ไข หรือตั้งค่า Real Tools และ Mockup Tools
 // หากต้องการเพิ่มหรือแก้ Tool:
 //   1. แก้ไขหรือเพิ่มรายการในตัวแปร ConfiguredTools ด้านล่างนี้
-//   2. ระบบจะนำ Keywords ไปจับคู่กับ Node ใน Flowchart อัตโนมัติ (ไม่ต้องแก้ flow_builder.go)
-//   3. เวลาสั่ง Run Node ระบบจะยิง HTTP จริงตาม Endpoint/Headers/BodyTemplate หรือรัน CustomExecute
-//   4. หากยังไม่ได้ตั้งค่า RequiredEnv ในไฟล์ .env และเปิด FallbackToSandbox: true
+//   2. ระบุ InputFields เพื่อให้ระบบสร้างช่องพิมพ์ (text / password) ฝังลงใน Node อัตโนมัติ
+//      - หากช่องมี EnvFallback (เช่น VT_API_KEY) ระบบจะใช้ค่าที่พิมพ์ในหน้า Node ก่อน
+//        และหากเว้นว่างไว้จะดึงค่าจากไฟล์ .env มาใช้แทนโดยอัตโนมัติ
+//   3. ระบบจะนำ Keywords ไปจับคู่กับ Node ใน Flowchart อัตโนมัติ (ไม่ต้องแก้ flow_builder.go)
+//   4. หากยังไม่ได้กรอกค่าและไม่ได้ตั้งค่าใน .env (เมื่อ FallbackToSandbox: true)
 //      ระบบจะสลับไปรันโหมดจำลอง (Sandbox) อัตโนมัติโดยไม่ทำให้ระบบพัง
-//
-// ตัวแปร Placeholder ที่ใช้ใน Endpoint, Headers, QueryParams, BodyTemplate ได้:
-//   - {{ip}}       : IP Address ที่ตรวจพบจากข้อความ Node หรือจากช่อง Run Inputs
-//   - {{query}}    : คำค้นหา หรือ Splunk Query ที่ติดมากับลิงก์ใน Node / Run Inputs
-//   - {{hash}}     : ค่า File Hash (MD5 / SHA256)
-//   - {{domain}}   : ชื่อโดเมน
-//   - {{url}}      : ลิงก์ URL ที่แนบอยู่ใน Node
-//   - {{label}}    : ข้อความของขั้นตอน (Node Label)
-//   - {{env.NAME}} : ดึงค่าตัวแปรจาก Environment / ไฟล์ .env เช่น {{env.VT_API_KEY}}
 // ============================================================================
+
+type ToolInputField struct {
+	Key         string `json:"key"`                   // ชื่อตัวแปร เช่น "target", "ip", "query", "api_key"
+	Label       string `json:"label"`                 // ป้ายชื่อช่องบน Node
+	Placeholder string `json:"placeholder,omitempty"` // ข้อความตัวอย่างในช่องพิมพ์
+	Type        string `json:"type"`                  // "text" หรือ "password"
+	Required    bool   `json:"required,omitempty"`
+	EnvFallback string `json:"-"`                     // ตัวแปร .env สำรองกรณีไม่ได้กรอกในหน้า Node
+}
 
 type ToolConfig struct {
 	ID                 string
 	Name               string
 	Category           string // "lookup" หรือ "action"
 	Keywords           []string
+	InputFields        []ToolInputField
 	Enabled            bool
 	FallbackToSandbox  bool
-	RequiredEnv        []string
-	RequiredInputs     []string
+	RequiredEnv        []string // Env ที่ต้องมีใน .env (สำหรับ URL ภายในที่ไม่ได้กรอกใน Node)
+	RequiredInputs     []string // Input keys ที่ต้องมีค่า (จากช่อง Node, env fallback, หรือ label/link)
 	Method             string
 	Endpoint           string
 	Headers            map[string]string
@@ -52,13 +55,14 @@ type ToolConfig struct {
 }
 
 type ToolStatusSummary struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Category    string   `json:"category"`
-	Enabled     bool     `json:"enabled"`
-	ReadyReal   bool     `json:"ready_real"`
-	Mode        string   `json:"mode"`
-	MissingEnv  []string `json:"missing_env,omitempty"`
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Category    string           `json:"category"`
+	Enabled     bool             `json:"enabled"`
+	ReadyReal   bool             `json:"ready_real"`
+	Mode        string           `json:"mode"`
+	MissingEnv  []string         `json:"missing_env,omitempty"`
+	InputFields []ToolInputField `json:"input_fields,omitempty"`
 }
 
 // NormalizeToolID แปลงรหัส Tool เก่าให้เป็นรหัสมาตรฐานปัจจุบันโดยไม่ผูกกับชื่อแบรนด์ภายนอก
@@ -76,36 +80,67 @@ func NormalizeToolID(id string) string {
 
 // ConfiguredTools คือรายการ Tool ทั้งหมดในระบบ (แก้ไขไฟล์นี้ไฟล์เดียวเพื่อเพิ่ม/ปรับแต่ง Tool)
 var ConfiguredTools = []ToolConfig{
-	// 1. VirusTotal (Real HTTP API เมื่อตั้งค่า VT_API_KEY ใน .env)
+	// 1. VirusTotal — ค้นหาได้ทั้ง IP / Domain / File Hash (ใช้ API Key จากช่องใน Node ก่อน .env)
 	{
-		ID:                "virustotal",
-		Name:              "VirusTotal Threat Lookup",
-		Category:          "lookup",
-		Keywords:          []string{"virustotal", "vt"},
+		ID:       "virustotal",
+		Name:     "VirusTotal Threat Lookup",
+		Category: "lookup",
+		Keywords: []string{"virustotal", "vt"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "target",
+				Label:       "ค้นหา IP / Domain / Hash",
+				Placeholder: "เช่น 8.8.8.8, evil.com, SHA256",
+				Type:        "text",
+				Required:    true,
+			},
+			{
+				Key:         "api_key",
+				Label:       "VT API Key",
+				Placeholder: "กรอก Key (เว้นว่างใช้ .env)",
+				Type:        "password",
+				EnvFallback: "VT_API_KEY",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
-		RequiredEnv:       []string{"VT_API_KEY"},
-		RequiredInputs:    []string{"ip"},
+		RequiredInputs:    []string{"target", "api_key"},
 		Method:            "GET",
-		Endpoint:          "https://www.virustotal.com/api/v3/ip_addresses/{{ip}}",
+		Endpoint:          "https://www.virustotal.com/api/v3/ip_addresses/{{target}}",
 		Headers: map[string]string{
-			"x-apikey": "{{env.VT_API_KEY}}",
+			"x-apikey": "{{api_key}}",
 			"Accept":   "application/json",
 		},
 		TimeoutSec:     15,
 		ResponseMapper: mapVirusTotalResponse,
+		CustomExecute:  executeVirusTotalSmart,
 	},
 
-	// 2. AbuseIPDB (Real HTTP API เมื่อตั้งค่า ABUSEIPDB_API_KEY ใน .env)
+	// 2. AbuseIPDB — ตรวจสอบชื่อเสียง IP (ใช้ API Key จากช่องใน Node ก่อน .env)
 	{
-		ID:                "abuseipdb",
-		Name:              "AbuseIPDB Reputation Check",
-		Category:          "lookup",
-		Keywords:          []string{"abuseipdb", "reputation"},
+		ID:       "abuseipdb",
+		Name:     "AbuseIPDB Reputation Check",
+		Category: "lookup",
+		Keywords: []string{"abuseipdb", "reputation"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "ip",
+				Label:       "ค้นหา IP Address",
+				Placeholder: "เช่น 185.220.101.42",
+				Type:        "text",
+				Required:    true,
+			},
+			{
+				Key:         "api_key",
+				Label:       "AbuseIPDB Key",
+				Placeholder: "กรอก Key (เว้นว่างใช้ .env)",
+				Type:        "password",
+				EnvFallback: "ABUSEIPDB_API_KEY",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
-		RequiredEnv:       []string{"ABUSEIPDB_API_KEY"},
-		RequiredInputs:    []string{"ip"},
+		RequiredInputs:    []string{"ip", "api_key"},
 		Method:            "GET",
 		Endpoint:          "https://api.abuseipdb.com/api/v2/check",
 		QueryParams: map[string]string{
@@ -113,24 +148,71 @@ var ConfiguredTools = []ToolConfig{
 			"maxAgeInDays": "90",
 		},
 		Headers: map[string]string{
-			"Key":    "{{env.ABUSEIPDB_API_KEY}}",
+			"Key":    "{{api_key}}",
 			"Accept": "application/json",
 		},
 		TimeoutSec:     15,
 		ResponseMapper: mapAbuseIPDBResponse,
 	},
 
-	// 3. Splunk SIEM (Real HTTP API เมื่อตั้งค่า SPLUNK_URL และ SPLUNK_TOKEN ใน .env)
-	// ดึง {{query}} อัตโนมัติจากลิงก์ Splunk ที่ฝังอยู่ใน Node หรือจากช่อง Run Inputs
+	// 3. Shodan — ค้นหา Host IP หรือ Shodan Query (ใช้ API Key จากช่องใน Node ก่อน .env)
 	{
-		ID:                "splunk",
-		Name:              "Splunk SIEM Search",
-		Category:          "lookup",
-		Keywords:          []string{"splunk", "siem"},
+		ID:       "shodan",
+		Name:     "Shodan Host & Search",
+		Category: "lookup",
+		Keywords: []string{"shodan"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "query",
+				Label:       "ค้นหา Shodan (IP / Query)",
+				Placeholder: "เช่น 8.8.8.8 หรือ port:22",
+				Type:        "text",
+				Required:    true,
+			},
+			{
+				Key:         "api_key",
+				Label:       "Shodan API Key",
+				Placeholder: "กรอก Key (เว้นว่างใช้ .env)",
+				Type:        "password",
+				EnvFallback: "SHODAN_API_KEY",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
-		RequiredEnv:       []string{"SPLUNK_URL", "SPLUNK_TOKEN"},
-		RequiredInputs:    []string{"query"},
+		RequiredInputs:    []string{"query", "api_key"},
+		Method:            "GET",
+		Endpoint:          "https://api.shodan.io/shodan/host/{{query}}",
+		TimeoutSec:        15,
+		ResponseMapper:    mapShodanResponse,
+		CustomExecute:     executeShodanSmart,
+	},
+
+	// 4. Splunk SIEM — ดึง SPL อัตโนมัติจากลิงก์ใน Node หรือพิมพ์แก้ไขในช่อง (Token ใน Node ก่อน .env)
+	{
+		ID:       "splunk",
+		Name:     "Splunk SIEM Search",
+		Category: "lookup",
+		Keywords: []string{"splunk", "siem"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "query",
+				Label:       "Splunk Query (SPL)",
+				Placeholder: "เช่น index=auth action=failure",
+				Type:        "text",
+				Required:    true,
+			},
+			{
+				Key:         "token",
+				Label:       "Splunk Token",
+				Placeholder: "กรอก Token (เว้นว่างใช้ .env)",
+				Type:        "password",
+				EnvFallback: "SPLUNK_TOKEN",
+			},
+		},
+		Enabled:           true,
+		FallbackToSandbox: true,
+		RequiredEnv:       []string{"SPLUNK_URL"},
+		RequiredInputs:    []string{"query", "token"},
 		Method:            "POST",
 		Endpoint:          "{{env.SPLUNK_URL}}/services/search/jobs/export",
 		QueryParams: map[string]string{
@@ -138,20 +220,27 @@ var ConfiguredTools = []ToolConfig{
 			"search":      "{{query}}",
 		},
 		Headers: map[string]string{
-			"Authorization": "Bearer {{env.SPLUNK_TOKEN}}",
+			"Authorization": "Bearer {{token}}",
 			"Accept":        "application/json",
 		},
 		TimeoutSec:         20,
 		InsecureSkipVerify: true,
 	},
 
-	// 4. Ticket Search (ระบบค้นหาทิกเก็ต/เคสเก่าที่เรา Mockup ขึ้นมาเองภายใน)
-	// สามารถสลับไปยิง API จริงได้ทันทีหากตั้งค่า TICKET_SEARCH_API_URL ใน .env
+	// 5. Ticket Search — ระบบค้นหาทิกเก็ต/เคสเก่าจำลองภายใน (ไม่ใช้ชื่อ Jira)
 	{
-		ID:                "ticket_search",
-		Name:              "Ticket Search System",
-		Category:          "lookup",
-		Keywords:          []string{"เคสเก่า", "ประวัติเคส", "ค้นหาเคส", "ticket search", "case search", "ค้นหา ticket", "ประวัติ"},
+		ID:       "ticket_search",
+		Name:     "Ticket Search System",
+		Category: "lookup",
+		Keywords: []string{"เคสเก่า", "ประวัติเคส", "ค้นหาเคส", "ticket search", "case search", "ค้นหา ticket", "ประวัติ"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "query",
+				Label:       "ค้นหา Ticket / IP",
+				Placeholder: "เช่น 185.220.101.42 หรือ TCK-1024",
+				Type:        "text",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
 		Method:            "GET",
@@ -164,20 +253,36 @@ var ConfiguredTools = []ToolConfig{
 		CustomExecute: executeMockupTicketSearch,
 	},
 
-	// 5. Firewall Block (Real HTTP Webhook/API เมื่อตั้งค่า FIREWALL_API_URL และ FIREWALL_API_KEY)
+	// 6. Firewall Block — สั่งบล็อก IP บน Firewall (Token ใน Node ก่อน .env)
 	{
-		ID:                "firewall_block",
-		Name:              "Firewall Block Controller",
-		Category:          "action",
-		Keywords:          []string{"บล็อก", "ระงับ", "block", "firewall"},
+		ID:       "firewall_block",
+		Name:     "Firewall Block Controller",
+		Category: "action",
+		Keywords: []string{"บล็อก", "ระงับ", "block", "firewall"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "ip",
+				Label:       "IP ที่ต้องการบล็อก",
+				Placeholder: "เช่น 185.220.101.42",
+				Type:        "text",
+				Required:    true,
+			},
+			{
+				Key:         "api_key",
+				Label:       "Firewall Token",
+				Placeholder: "กรอก Token (เว้นว่างใช้ .env)",
+				Type:        "password",
+				EnvFallback: "FIREWALL_API_KEY",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
-		RequiredEnv:       []string{"FIREWALL_API_URL", "FIREWALL_API_KEY"},
-		RequiredInputs:    []string{"ip"},
+		RequiredEnv:       []string{"FIREWALL_API_URL"},
+		RequiredInputs:    []string{"ip", "api_key"},
 		Method:            "POST",
 		Endpoint:          "{{env.FIREWALL_API_URL}}",
 		Headers: map[string]string{
-			"Authorization": "Bearer {{env.FIREWALL_API_KEY}}",
+			"Authorization": "Bearer {{api_key}}",
 			"Content-Type":  "application/json",
 		},
 		BodyTemplate: map[string]any{
@@ -188,13 +293,20 @@ var ConfiguredTools = []ToolConfig{
 		TimeoutSec: 15,
 	},
 
-	// 6. Ticket System (ระบบเปิดเคส/บันทึกทิกเก็ตที่เรา Mockup ขึ้นมาเองภายใน)
-	// เมื่อสร้างทิกเก็ตใหม่ ข้อมูลจะถูกเก็บเข้าฐานข้อมูลจำลองเพื่อให้ ticket_search ค้นเจอได้ทันที
+	// 7. Ticket System — ระบบเปิดเคส/บันทึกทิกเก็ตจำลองภายใน (เชื่อมต่อกับ ticket_search)
 	{
-		ID:                "ticket",
-		Name:              "Ticket Management System",
-		Category:          "action",
-		Keywords:          []string{"ticket", "เปิดเคส", "บันทึกเคส", "เคส", "tier"},
+		ID:       "ticket",
+		Name:     "Ticket Management System",
+		Category: "action",
+		Keywords: []string{"ticket", "เปิดเคส", "บันทึกเคส", "เคส", "tier"},
+		InputFields: []ToolInputField{
+			{
+				Key:         "ip",
+				Label:       "Target IP (ถ้ามี)",
+				Placeholder: "เช่น 185.220.101.42",
+				Type:        "text",
+			},
+		},
 		Enabled:           true,
 		FallbackToSandbox: true,
 		Method:            "POST",
@@ -216,24 +328,84 @@ var ConfiguredTools = []ToolConfig{
 		// ตัวอย่างการเพิ่ม Real Tool ใหม่ (Copy บล็อกนี้แล้วเปิดคอมเมนต์เพื่อใช้งานได้เลย)
 		// -------------------------------------------------------------------------
 		{
-			ID:                "slack_notify",
-			Name:              "Slack SOC Alert Webhook",
-			Category:          "action",
-			Keywords:          []string{"slack", "แจ้งเตือนแชท", "notify"},
+			ID:       "slack_notify",
+			Name:     "Slack SOC Alert Webhook",
+			Category: "action",
+			Keywords: []string{"slack", "แจ้งเตือนแชท", "notify"},
+			InputFields: []ToolInputField{
+				{Key: "message", Label: "ข้อความเพิ่มเติม", Placeholder: "รายละเอียดแจ้งเตือน", Type: "text"},
+				{Key: "webhook_url", Label: "Webhook URL", Placeholder: "กรอก URL (เว้นว่างใช้ .env)", Type: "password", EnvFallback: "SLACK_WEBHOOK_URL"},
+			},
 			Enabled:           true,
 			FallbackToSandbox: true,
-			RequiredEnv:       []string{"SLACK_WEBHOOK_URL"},
+			RequiredInputs:    []string{"webhook_url"},
 			Method:            "POST",
-			Endpoint:          "{{env.SLACK_WEBHOOK_URL}}",
+			Endpoint:          "{{webhook_url}}",
 			Headers: map[string]string{
 				"Content-Type": "application/json",
 			},
 			BodyTemplate: map[string]any{
-				"text": "🚨 [SOC Playbook] {{label}} (Target IP: {{ip}})",
+				"text": "🚨 [SOC Playbook] {{label}} {{message}}",
 			},
 			TimeoutSec: 10,
 		},
 	*/
+}
+
+// ============================================================================
+// SMART REAL TOOL HANDLERS (VIRUSTOTAL & SHODAN)
+// ============================================================================
+
+func executeVirusTotalSmart(ctx context.Context, tool *ToolConfig, req ExecutionRequest, vars map[string]string) (map[string]any, string, error) {
+	target := strings.TrimSpace(vars["target"])
+	if target == "" {
+		target = strings.TrimSpace(vars["ip"])
+	}
+	baseURL := "https://www.virustotal.com/api/v3"
+	if customBase := strings.TrimRight(strings.TrimSpace(os.Getenv("VT_BASE_URL")), "/"); customBase != "" {
+		baseURL = customBase
+	}
+
+	endpoint := baseURL + "/domains/{{target}}"
+	switch {
+	case ipv4ExactRegex.MatchString(target):
+		endpoint = baseURL + "/ip_addresses/{{target}}"
+	case hashExactRegex.MatchString(target):
+		endpoint = baseURL + "/files/{{target}}"
+	}
+
+	clone := *tool
+	clone.Endpoint = endpoint
+	out, err := executeHTTPConfigTool(ctx, &clone, req, vars)
+	return out, "real", err
+}
+
+func executeShodanSmart(ctx context.Context, tool *ToolConfig, req ExecutionRequest, vars map[string]string) (map[string]any, string, error) {
+	query := strings.TrimSpace(vars["query"])
+	if query == "" {
+		query = strings.TrimSpace(vars["ip"])
+	}
+	baseURL := "https://api.shodan.io"
+	if customBase := strings.TrimRight(strings.TrimSpace(os.Getenv("SHODAN_BASE_URL")), "/"); customBase != "" {
+		baseURL = customBase
+	}
+
+	clone := *tool
+	if ipv4ExactRegex.MatchString(query) {
+		clone.Endpoint = baseURL + "/shodan/host/{{query}}"
+		clone.QueryParams = map[string]string{
+			"key": "{{api_key}}",
+		}
+	} else {
+		clone.Endpoint = baseURL + "/shodan/host/search"
+		clone.QueryParams = map[string]string{
+			"key":   "{{api_key}}",
+			"query": "{{query}}",
+		}
+	}
+
+	out, err := executeHTTPConfigTool(ctx, &clone, req, vars)
+	return out, "real", err
 }
 
 // ============================================================================
@@ -322,7 +494,7 @@ func searchInternalMockupTickets(req ExecutionRequest, vars map[string]string) m
 
 	filterUsed := "all_recent_cases"
 	switch {
-	case searchIP != "" && searchQuery != "":
+	case searchIP != "" && searchQuery != "" && searchIP != searchQuery:
 		filterUsed = "ip:" + searchIP + " | query:" + searchQuery
 	case searchIP != "":
 		filterUsed = "ip:" + searchIP
@@ -399,6 +571,7 @@ func mapVirusTotalResponse(statusCode int, rawBody []byte) (map[string]any, erro
 	var parsed struct {
 		Data struct {
 			ID         string `json:"id"`
+			Type       string `json:"type"`
 			Attributes struct {
 				Country           string         `json:"country"`
 				ASOwner           string         `json:"as_owner"`
@@ -421,6 +594,7 @@ func mapVirusTotalResponse(statusCode int, rawBody []byte) (map[string]any, erro
 	return map[string]any{
 		"tool":             "VirusTotal API",
 		"http_status":      statusCode,
+		"indicator_type":   parsed.Data.Type,
 		"target":           parsed.Data.ID,
 		"country":          parsed.Data.Attributes.Country,
 		"as_owner":         parsed.Data.Attributes.ASOwner,
@@ -462,6 +636,60 @@ func mapAbuseIPDBResponse(statusCode int, rawBody []byte) (map[string]any, error
 	}, nil
 }
 
+func mapShodanResponse(statusCode int, rawBody []byte) (map[string]any, error) {
+	var hostResp struct {
+		IPStr       string   `json:"ip_str"`
+		Org         string   `json:"org"`
+		OS          string   `json:"os"`
+		CountryName string   `json:"country_name"`
+		Ports       []int    `json:"ports"`
+		Vulns       []string `json:"vulns"`
+	}
+	if err := json.Unmarshal(rawBody, &hostResp); err == nil && hostResp.IPStr != "" {
+		return map[string]any{
+			"tool":        "Shodan Host API",
+			"http_status": statusCode,
+			"ip":          hostResp.IPStr,
+			"org":         hostResp.Org,
+			"os":          hostResp.OS,
+			"country":     hostResp.CountryName,
+			"open_ports":  hostResp.Ports,
+			"vulns":       hostResp.Vulns,
+		}, nil
+	}
+
+	var searchResp struct {
+		Total   int `json:"total"`
+		Matches []struct {
+			IPStr string `json:"ip_str"`
+			Port  int    `json:"port"`
+			Org   string `json:"org"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(rawBody, &searchResp); err == nil && (searchResp.Total > 0 || len(searchResp.Matches) > 0) {
+		limit := len(searchResp.Matches)
+		if limit > 5 {
+			limit = 5
+		}
+		topMatches := make([]map[string]any, 0, limit)
+		for _, m := range searchResp.Matches[:limit] {
+			topMatches = append(topMatches, map[string]any{
+				"ip":   m.IPStr,
+				"port": m.Port,
+				"org":  m.Org,
+			})
+		}
+		return map[string]any{
+			"tool":          "Shodan Search API",
+			"http_status":   statusCode,
+			"total_matches": searchResp.Total,
+			"top_results":   topMatches,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unrecognized shodan payload")
+}
+
 func GetToolConfigByID(id string) (*ToolConfig, bool) {
 	canonical := NormalizeToolID(id)
 	for i := range ConfiguredTools {
@@ -485,17 +713,30 @@ func MissingToolEnvVars(tool *ToolConfig) []string {
 	return missing
 }
 
+func MissingToolCredentialEnvs(tool *ToolConfig) []string {
+	if tool == nil {
+		return nil
+	}
+	missing := MissingToolEnvVars(tool)
+	for _, f := range tool.InputFields {
+		if f.EnvFallback != "" && strings.TrimSpace(os.Getenv(f.EnvFallback)) == "" {
+			missing = append(missing, f.EnvFallback)
+		}
+	}
+	return missing
+}
+
 func ListToolStatuses() []ToolStatusSummary {
 	out := make([]ToolStatusSummary, 0, len(ConfiguredTools))
 	for i := range ConfiguredTools {
 		t := &ConfiguredTools[i]
-		missing := MissingToolEnvVars(t)
+		missing := MissingToolCredentialEnvs(t)
 		mode := "sandbox"
 		readyReal := false
 		if t.Enabled {
 			resolvedEndpoint := strings.TrimSpace(substituteTemplateVars(t.Endpoint, nil))
 			hasHTTPEndpoint := strings.HasPrefix(resolvedEndpoint, "http://") || strings.HasPrefix(resolvedEndpoint, "https://")
-			if t.CustomExecute != nil && len(t.RequiredEnv) == 0 {
+			if t.CustomExecute != nil && len(t.RequiredEnv) == 0 && len(t.RequiredInputs) == 0 {
 				if hasHTTPEndpoint {
 					mode = "real"
 				} else {
@@ -508,13 +749,14 @@ func ListToolStatuses() []ToolStatusSummary {
 			}
 		}
 		out = append(out, ToolStatusSummary{
-			ID:         t.ID,
-			Name:       t.Name,
-			Category:   t.Category,
-			Enabled:    t.Enabled,
-			ReadyReal:  readyReal,
-			Mode:       mode,
-			MissingEnv: missing,
+			ID:          t.ID,
+			Name:        t.Name,
+			Category:    t.Category,
+			Enabled:     t.Enabled,
+			ReadyReal:   readyReal,
+			Mode:        mode,
+			MissingEnv:  missing,
+			InputFields: t.InputFields,
 		})
 	}
 	return out
