@@ -7,13 +7,14 @@ import (
 )
 
 type AppConfig struct {
-	Port        string
-	MongoURI    string
-	MongoDB     string
-	LlmProvider string
-	LlmEndpoint string
-	LlmModel    string
-	HfToken     string
+	Port               string
+	MongoURI           string
+	MongoDB            string
+	LlmProvider        string
+	LlmEndpoint        string
+	LlmModel           string
+	HfToken            string
+	AllowLiveExecution bool
 }
 
 var Config AppConfig
@@ -21,14 +22,16 @@ var Config AppConfig
 func LoadEnvConfig() {
 	readDotEnvFile(".env")
 	readDotEnvFile("../.env")
+	liveFlag := strings.ToLower(getEnvOrDefault("ALLOW_LIVE_EXECUTION", "false"))
 	Config = AppConfig{
-		Port:        getEnvOrDefault("PORT", "8080"),
-		MongoURI:    getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
-		MongoDB:     getEnvOrDefault("MONGO_DB", "soc_platform"),
-		LlmProvider: getEnvOrDefault("LLM_PROVIDER", "ollama"),
-		LlmEndpoint: getEnvOrDefault("LLM_ENDPOINT", "http://localhost:11434"),
-		LlmModel:    getEnvOrDefault("LLM_MODEL", "qwen2.5:3b"),
-		HfToken:     getEnvOrDefault("HF_TOKEN", ""),
+		Port:               getEnvOrDefault("PORT", "8080"),
+		MongoURI:           getEnvOrDefault("MONGO_URI", "mongodb://localhost:27017"),
+		MongoDB:            getEnvOrDefault("MONGO_DB", "soc_platform"),
+		LlmProvider:        getEnvOrDefault("LLM_PROVIDER", "ollama"),
+		LlmEndpoint:        getEnvOrDefault("LLM_ENDPOINT", "http://localhost:11434"),
+		LlmModel:           getEnvOrDefault("LLM_MODEL", "qwen2.5:3b"),
+		HfToken:            getEnvOrDefault("HF_TOKEN", ""),
+		AllowLiveExecution: liveFlag == "true" || liveFlag == "1" || liveFlag == "yes",
 	}
 }
 

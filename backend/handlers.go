@@ -22,6 +22,7 @@ func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository) *ApiHandl
 }
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
+	r.GET("/api/config", h.GetRuntimeConfig)
 	r.POST("/api/generate", h.GenerateFlowchart)
 	r.GET("/api/sops", h.ListPlaybooks)
 	r.POST("/api/sops", h.SavePlaybook)
@@ -35,6 +36,12 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/api/export/bpmn", h.ExportBpmn)
 	r.POST("/api/export/cacao", h.ExportCacao)
 	r.POST("/api/export/markdown", h.ExportMarkdown)
+}
+
+func (h *ApiHandler) GetRuntimeConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"allow_live_execution": Config.AllowLiveExecution,
+	})
 }
 
 func (h *ApiHandler) GenerateFlowchart(c *gin.Context) {
@@ -136,6 +143,9 @@ func (h *ApiHandler) ListTools(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงรายการ Tools จาก MongoDB ไม่สำเร็จ"})
 		return
 	}
+	for i := range items {
+		PopulateToolAuthStatus(&items[i])
+	}
 	c.JSON(http.StatusOK, items)
 }
 
@@ -159,6 +169,7 @@ func (h *ApiHandler) CreateTool(c *gin.Context) {
 		}
 		return
 	}
+	PopulateToolAuthStatus(&created)
 	c.JSON(http.StatusCreated, created)
 }
 
@@ -182,6 +193,7 @@ func (h *ApiHandler) UpdateTool(c *gin.Context) {
 		}
 		return
 	}
+	PopulateToolAuthStatus(&updated)
 	c.JSON(http.StatusOK, updated)
 }
 
@@ -297,6 +309,10 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		if def, err := h.toolRepo.GetByID(ctx, req.Tool); err == nil {
 			toolDef = def
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(req.ExecutionMode), "live") {
+		c.JSON(http.StatusOK, RunLiveHTTPStep(req, toolDef))
+		return
 	}
 	c.JSON(http.StatusOK, RunSandboxStep(req, toolDef))
 }
