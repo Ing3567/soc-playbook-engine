@@ -1,4 +1,11 @@
-import type { FlowNode, FlowEdge, PlaybookItem } from './types'
+import type { FlowNode, FlowEdge, PlaybookItem, ToolStatusSummary } from './types'
+
+export async function getTools(): Promise<ToolStatusSummary[]> {
+  const res = await fetch('/api/tools')
+  if (!res.ok) return []
+  const data = await res.json()
+  return Array.isArray(data) ? data : []
+}
 
 export async function generateFlowchart(form: FormData) {
   const res = await fetch('/api/generate', { method: 'POST', body: form })

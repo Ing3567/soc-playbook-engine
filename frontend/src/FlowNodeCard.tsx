@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import type { NodeImage, NodeLink, RunStatus } from './types'
+import type { NodeImage, NodeLink, RunStatus, ToolInputField } from './types'
 
 function isSafeHttpUrl(raw: string): boolean {
   return /^https?:\/\//i.test(raw.trim())
@@ -18,9 +18,13 @@ export function FlowNodeCard({ data }: NodeProps) {
   const status = (data.status as RunStatus) || 'idle'
   const onRun = data.onRun as () => void
   const onPreviewImage = data.onPreviewImage as ((img: NodeImage) => void) | undefined
+  const onInputChange = data.onInputChange as ((key: string, value: string) => void) | undefined
   const links = Array.isArray(data.links) ? (data.links as NodeLink[]) : []
   const images = Array.isArray(data.images) ? (data.images as NodeImage[]) : []
+  const inputFields = Array.isArray(data.inputFields) ? (data.inputFields as ToolInputField[]) : []
+  const inputValues = (data.inputValues as Record<string, string>) || {}
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [revealedKeys, setRevealedKeys] = useState<Record<string, boolean>>({})
 
   let boxStyle = 'bg-slate-100 border-slate-400 text-slate-800 rounded-xl'
   let badge = 'ACTION'
@@ -45,8 +49,8 @@ export function FlowNodeCard({ data }: NodeProps) {
   if (status === 'failed') ringStyle = 'ring-4 ring-rose-500'
 
   const canRun = nodeType === 'lookup' || nodeType === 'action'
-  const hasAssets = links.length > 0 || images.length > 0
-  const widthClass = hasAssets ? 'w-[260px]' : 'w-[230px]'
+  const hasRichContent = links.length > 0 || images.length > 0 || (canRun && inputFields.length > 0)
+  const widthClass = hasRichContent ? 'w-[260px]' : 'w-[230px]'
 
   return (
     <div className={`${widthClass} border-2 px-3 py-2 shadow-sm ${boxStyle} ${ringStyle}`}>
@@ -56,6 +60,61 @@ export function FlowNodeCard({ data }: NodeProps) {
         {tool !== 'none' && <span className="uppercase">{tool}</span>}
       </div>
       <div className="mt-1 text-xs font-semibold leading-snug break-words">{label}</div>
+
+      {canRun && inputFields.length > 0 && (
+        <div
+          className="nodrag nopan mt-2 space-y-1.5 border-t border-black/10 pt-1.5"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {inputFields.map((field) => {
+            const isPassword = field.type === 'password'
+            const isRevealed = Boolean(revealedKeys[field.key])
+            const currentVal = inputValues[field.key] ?? ''
+            return (
+              <div key={field.key} className="space-y-0.5">
+                <label className="block text-[9px] font-bold uppercase tracking-wide opacity-75">
+                  {isPassword ? '🔑 ' : '🔎 '}
+                  {field.label}
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type={isPassword && !isRevealed ? 'password' : 'text'}
+                    value={currentVal}
+                    onChange={(e) => onInputChange?.(field.key, e.target.value)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        onRun()
+                      }
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={field.placeholder || ''}
+                    className="nodrag w-full rounded border border-black/20 bg-white/95 px-1.5 py-1 font-mono text-[10px] text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none"
+                  />
+                  {isPassword && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setRevealedKeys((prev) => ({ ...prev, [field.key]: !prev[field.key] }))
+                      }}
+                      className="no-print shrink-0 rounded border border-black/15 bg-white/90 px-1.5 py-1 text-[9px] font-semibold text-slate-600 hover:bg-slate-100"
+                      title={isRevealed ? 'ซ่อนรหัส' : 'แสดงรหัส'}
+                    >
+                      {isRevealed ? 'ซ่อน' : 'ดู'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {links.length > 0 && (
         <div className="nodrag nopan mt-2 space-y-1 border-t border-black/10 pt-1.5">

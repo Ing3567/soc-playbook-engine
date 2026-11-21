@@ -41,6 +41,25 @@ export interface PlaybookItem {
 
 export type RunStatus = 'idle' | 'running' | 'success' | 'failed'
 
+export interface ToolInputField {
+  key: string
+  label: string
+  placeholder?: string
+  type: 'text' | 'password'
+  required?: boolean
+}
+
+export interface ToolStatusSummary {
+  id: string
+  name: string
+  category: string
+  enabled: boolean
+  ready_real: boolean
+  mode: string
+  missing_env?: string[]
+  input_fields?: ToolInputField[]
+}
+
 export interface ExecutionLog {
   node_id: string
   label: string
