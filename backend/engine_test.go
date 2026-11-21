@@ -1214,3 +1214,23 @@ func TestScoringSimulationRunDeductions(t *testing.T) {
 		t.Fatalf("expected low total score for incomplete slow run, got %+v", sc)
 	}
 }
+
+func TestPlaybookVersioningSnapshot(t *testing.T) {
+	t1 := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	doc1, snap1 := PreparePlaybookVersion(PlaybookDocument{
+		Title: "Phishing SOP",
+		Nodes: []Node{{ID: "n1", Type: "lookup", Label: "Check VT", Tool: "virustotal"}},
+	}, 0, t1)
+	if doc1.Version != 1 || doc1.ID == "" {
+		t.Fatalf("expected version 1 and generated ID, got v=%d id=%q", doc1.Version, doc1.ID)
+	}
+	if snap1.PlaybookID != doc1.ID || snap1.Version != 1 || snap1.ID != doc1.ID+"_v1" {
+		t.Fatalf("unexpected v1 snapshot: %+v", snap1)
+	}
+
+	t2 := t1.Add(5 * time.Minute)
+	doc2, snap2 := PreparePlaybookVersion(doc1, doc1.Version, t2)
+	if doc2.Version != 2 || snap2.Version != 2 || snap2.ID != doc1.ID+"_v2" {
+		t.Fatalf("expected version 2 increment, got doc.v=%d snap=%+v", doc2.Version, snap2)
+	}
+}

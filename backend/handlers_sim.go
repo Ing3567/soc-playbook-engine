@@ -168,6 +168,7 @@ func (h *ApiHandler) StartRun(c *gin.Context) {
 	nodes := req.Nodes
 	edges := req.Edges
 	playbookID := strings.TrimSpace(req.PlaybookID)
+	playbookVersion := req.PlaybookVersion
 	playbookTitle := strings.TrimSpace(req.PlaybookTitle)
 
 	if len(nodes) == 0 && playbookID != "" && h.repo != nil {
@@ -184,6 +185,7 @@ func (h *ApiHandler) StartRun(c *gin.Context) {
 		}
 		nodes = pb.Nodes
 		edges = pb.Edges
+		playbookVersion = pb.Version
 		if playbookTitle == "" {
 			playbookTitle = pb.Title
 		}
@@ -216,22 +218,23 @@ func (h *ApiHandler) StartRun(c *gin.Context) {
 		traineeName = claims.Username
 	}
 	run := SimulationRun{
-		ID:            GeneratePrefixedID("run"),
-		ScenarioID:    strings.TrimSpace(req.ScenarioID),
-		ScenarioTitle: scenarioTitle,
-		PlaybookID:    playbookID,
-		PlaybookTitle: playbookTitle,
-		Nodes:         nodes,
-		Edges:         edges,
-		Alert:         alert,
-		TraineeID:     claims.UserID,
-		TraineeName:   traineeName,
-		Mode:          mode,
-		Status:        "in_progress",
-		NodeStatuses:  map[string]string{},
-		NodeOutputs:   map[string]map[string]any{},
-		StartedAt:     now,
-		UpdatedAt:     now,
+		ID:              GeneratePrefixedID("run"),
+		ScenarioID:      strings.TrimSpace(req.ScenarioID),
+		ScenarioTitle:   scenarioTitle,
+		PlaybookID:      playbookID,
+		PlaybookVersion: playbookVersion,
+		PlaybookTitle:   playbookTitle,
+		Nodes:           nodes,
+		Edges:           edges,
+		Alert:           alert,
+		TraineeID:       claims.UserID,
+		TraineeName:     traineeName,
+		Mode:            mode,
+		Status:          "in_progress",
+		NodeStatuses:    map[string]string{},
+		NodeOutputs:     map[string]map[string]any{},
+		StartedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	graphState := ComputeRunGraphState(run.Nodes, run.Edges, run.NodeStatuses, run.NodeOutputs, run.Alert)

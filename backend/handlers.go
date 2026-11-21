@@ -53,6 +53,7 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	// Authenticated endpoints (trainee & instructor)
 	r.GET("/api/auth/me", authReq, h.GetMe)
 	r.GET("/api/sops", authReq, h.ListPlaybooks)
+	r.GET("/api/sops/:id/versions", authReq, h.ListPlaybookVersions)
 	r.GET("/api/tools", authReq, h.ListTools)
 	r.GET("/api/scenarios", authReq, h.ListScenarios)
 	r.GET("/api/scenarios/:id", authReq, h.GetScenario)
@@ -315,6 +316,17 @@ func (h *ApiHandler) ListPlaybooks(c *gin.Context) {
 	items, err := h.repo.ListAll(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงข้อมูลจาก MongoDB ไม่สำเร็จ"})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (h *ApiHandler) ListPlaybookVersions(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	items, err := h.repo.ListVersions(ctx, c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงประวัติเวอร์ชัน Playbook ไม่สำเร็จ"})
 		return
 	}
 	c.JSON(http.StatusOK, items)

@@ -1,4 +1,4 @@
-module soc-demo
+module github.com/Ing3567/soc-playbook-engine/backend
 
 go 1.27.0
 

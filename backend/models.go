@@ -46,12 +46,25 @@ type Edge struct {
 
 type PlaybookDocument struct {
 	ID        string    `json:"id" bson:"_id"`
+	Version   int       `json:"version" bson:"version"`
 	Title     string    `json:"title" bson:"title"`
 	RawText   string    `json:"raw_text" bson:"raw_text"`
 	Engine    string    `json:"engine" bson:"engine"`
 	Nodes     []Node    `json:"nodes" bson:"nodes"`
 	Edges     []Edge    `json:"edges" bson:"edges"`
 	UpdatedAt time.Time `json:"updated_at" bson:"updated_at"`
+}
+
+type PlaybookVersionSnapshot struct {
+	ID         string    `json:"id" bson:"_id"`
+	PlaybookID string    `json:"playbook_id" bson:"playbook_id"`
+	Version    int       `json:"version" bson:"version"`
+	Title      string    `json:"title" bson:"title"`
+	RawText    string    `json:"raw_text" bson:"raw_text"`
+	Engine     string    `json:"engine" bson:"engine"`
+	Nodes      []Node    `json:"nodes" bson:"nodes"`
+	Edges      []Edge    `json:"edges" bson:"edges"`
+	CreatedAt  time.Time `json:"created_at" bson:"created_at"`
 }
 
 type ScenarioGroundTruth struct {
@@ -179,27 +192,28 @@ type RunScore struct {
 }
 
 type SimulationRun struct {
-	ID             string                    `json:"id" bson:"_id"`
-	ScenarioID     string                    `json:"scenario_id,omitempty" bson:"scenario_id,omitempty"`
-	ScenarioTitle  string                    `json:"scenario_title,omitempty" bson:"scenario_title,omitempty"`
-	PlaybookID     string                    `json:"playbook_id,omitempty" bson:"playbook_id,omitempty"`
-	PlaybookTitle  string                    `json:"playbook_title" bson:"playbook_title"`
-	Nodes          []Node                    `json:"nodes" bson:"nodes"`
-	Edges          []Edge                    `json:"edges" bson:"edges"`
-	Alert          map[string]any            `json:"alert,omitempty" bson:"alert,omitempty"`
-	TraineeID      string                    `json:"trainee_id" bson:"trainee_id"`
-	TraineeName    string                    `json:"trainee_name" bson:"trainee_name"`
-	Mode           string                    `json:"mode" bson:"mode"`
-	Status         string                    `json:"status" bson:"status"`
-	NodeStatuses   map[string]string         `json:"node_statuses" bson:"node_statuses"`
-	NodeOutputs    map[string]map[string]any `json:"node_outputs" bson:"node_outputs"`
-	TraversedEdges []string                  `json:"traversed_edges,omitempty" bson:"traversed_edges,omitempty"`
-	FinalVerdict   string                    `json:"final_verdict,omitempty" bson:"final_verdict,omitempty"`
-	Summary        string                    `json:"summary,omitempty" bson:"summary,omitempty"`
-	Score          *RunScore                 `json:"score,omitempty" bson:"score,omitempty"`
-	StartedAt      time.Time                 `json:"started_at" bson:"started_at"`
-	CompletedAt    *time.Time                `json:"completed_at,omitempty" bson:"completed_at,omitempty"`
-	UpdatedAt      time.Time                 `json:"updated_at" bson:"updated_at"`
+	ID              string                    `json:"id" bson:"_id"`
+	ScenarioID      string                    `json:"scenario_id,omitempty" bson:"scenario_id,omitempty"`
+	ScenarioTitle   string                    `json:"scenario_title,omitempty" bson:"scenario_title,omitempty"`
+	PlaybookID      string                    `json:"playbook_id,omitempty" bson:"playbook_id,omitempty"`
+	PlaybookVersion int                       `json:"playbook_version,omitempty" bson:"playbook_version,omitempty"`
+	PlaybookTitle   string                    `json:"playbook_title" bson:"playbook_title"`
+	Nodes           []Node                    `json:"nodes" bson:"nodes"`
+	Edges           []Edge                    `json:"edges" bson:"edges"`
+	Alert           map[string]any            `json:"alert,omitempty" bson:"alert,omitempty"`
+	TraineeID       string                    `json:"trainee_id" bson:"trainee_id"`
+	TraineeName     string                    `json:"trainee_name" bson:"trainee_name"`
+	Mode            string                    `json:"mode" bson:"mode"`
+	Status          string                    `json:"status" bson:"status"`
+	NodeStatuses    map[string]string         `json:"node_statuses" bson:"node_statuses"`
+	NodeOutputs     map[string]map[string]any `json:"node_outputs" bson:"node_outputs"`
+	TraversedEdges  []string                  `json:"traversed_edges,omitempty" bson:"traversed_edges,omitempty"`
+	FinalVerdict    string                    `json:"final_verdict,omitempty" bson:"final_verdict,omitempty"`
+	Summary         string                    `json:"summary,omitempty" bson:"summary,omitempty"`
+	Score           *RunScore                 `json:"score,omitempty" bson:"score,omitempty"`
+	StartedAt       time.Time                 `json:"started_at" bson:"started_at"`
+	CompletedAt     *time.Time                `json:"completed_at,omitempty" bson:"completed_at,omitempty"`
+	UpdatedAt       time.Time                 `json:"updated_at" bson:"updated_at"`
 }
 
 type RunEvent struct {
@@ -219,13 +233,14 @@ type RunEvent struct {
 }
 
 type StartRunRequest struct {
-	PlaybookID    string         `json:"playbook_id,omitempty"`
-	PlaybookTitle string         `json:"playbook_title,omitempty"`
-	ScenarioID    string         `json:"scenario_id,omitempty"`
-	Nodes         []Node         `json:"nodes,omitempty"`
-	Edges         []Edge         `json:"edges,omitempty"`
-	Alert         map[string]any `json:"alert,omitempty"`
-	Mode          string         `json:"mode,omitempty"`
+	PlaybookID      string         `json:"playbook_id,omitempty"`
+	PlaybookVersion int            `json:"playbook_version,omitempty"`
+	PlaybookTitle   string         `json:"playbook_title,omitempty"`
+	ScenarioID      string         `json:"scenario_id,omitempty"`
+	Nodes           []Node         `json:"nodes,omitempty"`
+	Edges           []Edge         `json:"edges,omitempty"`
+	Alert           map[string]any `json:"alert,omitempty"`
+	Mode            string         `json:"mode,omitempty"`
 }
 
 type RunStepRequest struct {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -19,6 +18,7 @@ type PlaybookRepository struct {
 	client     *mongo.Client
 	dbName     string
 	collection *mongo.Collection
+	versions   *mongo.Collection
 }
 
 func NewPlaybookRepository(ctx context.Context, uri, dbName string) (*PlaybookRepository, error) {
@@ -30,11 +30,22 @@ func NewPlaybookRepository(ctx context.Context, uri, dbName string) (*PlaybookRe
 		_ = client.Disconnect(context.Background())
 		return nil, err
 	}
+	db := client.Database(dbName)
 	return &PlaybookRepository{
 		client:     client,
 		dbName:     dbName,
-		collection: client.Database(dbName).Collection("playbooks"),
+		collection: db.Collection("playbooks"),
+		versions:   db.Collection("playbook_versions"),
 	}, nil
+}
+
+func (r *PlaybookRepository) EnsureIndexes(ctx context.Context) error {
+	idx := mongo.IndexModel{
+		Keys:    bson.D{{Key: "playbook_id", Value: 1}, {Key: "version", Value: -1}},
+		Options: options.Index().SetUnique(true),
+	}
+	_, err := r.versions.Indexes().CreateOne(ctx, idx)
+	return err
 }
 
 // Database returns the underlying MongoDB database handle.
@@ -60,6 +71,9 @@ func (r *PlaybookRepository) ListAll(ctx context.Context) ([]PlaybookDocument, e
 		return nil, err
 	}
 	for i := range items {
+		if items[i].Version <= 0 {
+			items[i].Version = 1
+		}
 		for j := range items[i].Nodes {
 			items[i].Nodes[j].Tool = NormalizeLegacyToolID(items[i].Nodes[j].Tool)
 		}
@@ -76,6 +90,9 @@ func (r *PlaybookRepository) GetByID(ctx context.Context, id string) (*PlaybookD
 		}
 		return nil, err
 	}
+	if doc.Version <= 0 {
+		doc.Version = 1
+	}
 	for j := range doc.Nodes {
 		doc.Nodes[j].Tool = NormalizeLegacyToolID(doc.Nodes[j].Tool)
 	}
@@ -83,15 +100,35 @@ func (r *PlaybookRepository) GetByID(ctx context.Context, id string) (*PlaybookD
 }
 
 func (r *PlaybookRepository) SaveOne(ctx context.Context, doc PlaybookDocument) (PlaybookDocument, error) {
-	if strings.TrimSpace(doc.Title) == "" {
-		doc.Title = "Untitled SOP"
+	prevVersion := 0
+	if trimmedID := strings.TrimSpace(doc.ID); trimmedID != "" {
+		if existing, err := r.GetByID(ctx, trimmedID); err == nil {
+			prevVersion = existing.Version
+		}
 	}
-	if strings.TrimSpace(doc.ID) == "" {
-		doc.ID = fmt.Sprintf("sop_%d", time.Now().UnixNano())
+	versionedDoc, snapshot := PreparePlaybookVersion(doc, prevVersion, time.Now())
+	if _, err := r.collection.ReplaceOne(ctx, bson.M{"_id": versionedDoc.ID}, versionedDoc, options.Replace().SetUpsert(true)); err != nil {
+		return PlaybookDocument{}, err
 	}
-	doc.UpdatedAt = time.Now()
-	_, err := r.collection.ReplaceOne(ctx, bson.M{"_id": doc.ID}, doc, options.Replace().SetUpsert(true))
-	return doc, err
+	if r.versions != nil {
+		_, _ = r.versions.ReplaceOne(ctx, bson.M{"_id": snapshot.ID}, snapshot, options.Replace().SetUpsert(true))
+	}
+	return versionedDoc, nil
+}
+
+func (r *PlaybookRepository) ListVersions(ctx context.Context, playbookID string) ([]PlaybookVersionSnapshot, error) {
+	opts := options.Find().SetSort(bson.D{{Key: "version", Value: -1}})
+	cursor, err := r.versions.Find(ctx, bson.M{"playbook_id": playbookID}, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	items := []PlaybookVersionSnapshot{}
+	if err := cursor.All(ctx, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *PlaybookRepository) DeleteOne(ctx context.Context, id string) error {
@@ -101,6 +138,9 @@ func (r *PlaybookRepository) DeleteOne(ctx context.Context, id string) error {
 	}
 	if res.DeletedCount == 0 {
 		return ErrPlaybookNotFound
+	}
+	if r.versions != nil {
+		_, _ = r.versions.DeleteMany(ctx, bson.M{"playbook_id": id})
 	}
 	return nil
 }

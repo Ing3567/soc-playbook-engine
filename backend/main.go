@@ -23,6 +23,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("MongoDB error: %v", err)
 	}
+	if err := repo.EnsureIndexes(ctx); err != nil {
+		log.Fatalf("Playbook index setup error: %v", err)
+	}
 
 	toolRepo := NewToolRepository(repo.Database())
 	if err := toolRepo.EnsureBuiltinTools(ctx); err != nil {
