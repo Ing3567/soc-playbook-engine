@@ -862,28 +862,29 @@ export default function App() {
       let lastOutput: Record<string, unknown> | null = null
 
       while (current && !visited.has(current.id)) {
-        visited.add(current.id)
-        const outEdges = outgoing.get(current.id) ?? []
+        const curNode: FlowNode = current
+        visited.add(curNode.id)
+        const outEdges: FlowEdge[] = outgoing.get(curNode.id) ?? []
 
-        if (current.type === 'lookup' || current.type === 'action') {
-          if (resume && initialStatuses[current.id] === 'success') {
-            const existingOut = initialOutputs[current.id] ?? null
+        if (curNode.type === 'lookup' || curNode.type === 'action') {
+          if (resume && initialStatuses[curNode.id] === 'success') {
+            const existingOut: Record<string, unknown> | null = initialOutputs[curNode.id] ?? null
             lastOutput = existingOut
             if (existingOut) {
-              localOutputs[current.id] = existingOut
+              localOutputs[curNode.id] = existingOut
             }
           } else {
-            const canonicalTool = current.tool === 'jira_ticket' ? 'ticket' : current.tool
-            const toolDef = toolsRef.current.find((t) => t.id === canonicalTool)
-            const isManualNode =
+            const canonicalTool: string = curNode.tool === 'jira_ticket' ? 'ticket' : curNode.tool
+            const toolDef: ToolDefinition | undefined = toolsRef.current.find((t) => t.id === canonicalTool)
+            const isManualNode: boolean =
               toolDef?.command_type === 'manual' ||
               canonicalTool === 'manual_lookup' ||
               canonicalTool === 'manual_action'
             if (isManualNode) {
               setLogs((prev) => [
                 {
-                  node_id: current!.id,
-                  label: current!.label,
+                  node_id: curNode.id,
+                  label: curNode.label,
                   status: 'idle',
                   duration_ms: 0,
                   timestamp: new Date().toTimeString().slice(0, 8),
@@ -897,28 +898,29 @@ export default function App() {
               break
             }
 
-            const res = await runNode(current.id, {
+            const res: { ok: boolean; output: Record<string, unknown> | null } = await runNode(curNode.id, {
               prev: lastOutput ?? {},
               nodes: localOutputs,
             })
             if (!res.ok) break
             lastOutput = res.output
             if (res.output) {
-              localOutputs[current.id] = res.output
+              localOutputs[curNode.id] = res.output
             }
           }
-        } else if (current.type === 'end') {
+        } else if (curNode.type === 'end') {
           break
         }
 
         const nextEdge: FlowEdge | undefined =
-          current.type === 'decision'
+          curNode.type === 'decision'
             ? pickDecisionEdge(outEdges, lastOutput, {
                 alert: alertContextRef.current,
                 nodes: localOutputs as Record<string, Record<string, unknown>>,
               })
             : outEdges[0]
-        current = nextEdge ? nodeMap.get(nextEdge.target) : undefined
+        const nextNode: FlowNode | undefined = nextEdge ? nodeMap.get(nextEdge.target) : undefined
+        current = nextNode
       }
     } finally {
       setIsRunningAll(false)
