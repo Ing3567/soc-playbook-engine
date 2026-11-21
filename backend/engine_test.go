@@ -1047,3 +1047,170 @@ func TestStructuredDecisionConditions(t *testing.T) {
 		t.Fatalf("expected legacy fallback e_yes for malicious output, got %+v", got)
 	}
 }
+
+func TestAuthPasswordHashAndJWT(t *testing.T) {
+	if _, err := NormalizeAndValidateUsername("ab"); err == nil {
+		t.Fatalf("expected short username to fail validation")
+	}
+	u, err := NormalizeAndValidateUsername("  Alice.SOC  ")
+	if err != nil || u != "alice.soc" {
+		t.Fatalf("unexpected normalized username: %q err=%v", u, err)
+	}
+	if _, err := HashPassword("12345"); err == nil {
+		t.Fatalf("expected short password to fail validation")
+	}
+
+	hash, err := HashPassword("S0c-Tr@inee!")
+	if err != nil {
+		t.Fatalf("HashPassword failed: %v", err)
+	}
+	if !VerifyPassword("S0c-Tr@inee!", hash) {
+		t.Fatalf("expected VerifyPassword to succeed for matching password")
+	}
+	if VerifyPassword("wrong-password", hash) {
+		t.Fatalf("expected VerifyPassword to reject wrong password")
+	}
+
+	secret := "unit-test-auth-secret-key"
+	claims := AuthClaims{
+		UserID:      "usr_1",
+		Username:    "trainee1",
+		DisplayName: "Trainee One",
+		Role:        "trainee",
+		Exp:         time.Now().Add(time.Hour).Unix(),
+	}
+	token, err := SignAuthToken(claims, secret, time.Hour)
+	if err != nil {
+		t.Fatalf("SignAuthToken failed: %v", err)
+	}
+	parsed, err := VerifyAuthToken(token, secret, time.Now())
+	if err != nil {
+		t.Fatalf("VerifyAuthToken failed: %v", err)
+	}
+	if parsed.UserID != "usr_1" || parsed.Role != "trainee" || parsed.Username != "trainee1" {
+		t.Fatalf("unexpected parsed claims: %+v", parsed)
+	}
+	if _, err := VerifyAuthToken(token, "wrong-secret", time.Now()); err == nil {
+		t.Fatalf("expected wrong secret to fail JWT verification")
+	}
+	if _, err := VerifyAuthToken(token, secret, time.Now().Add(2*time.Hour)); err == nil {
+		t.Fatalf("expected expired JWT to fail verification")
+	}
+}
+
+func TestServerRunEngineAndManualVerdict(t *testing.T) {
+	tp := FindBuiltinScenario("ssh_brute_force_tp")
+	vtTool := DefaultBuiltinTools()[0]
+	fwTool := DefaultBuiltinTools()[3]
+	manualTool := &ToolDefinition{ID: "web_manual", Name: "Web Check", Category: "lookup", CommandType: "manual"}
+
+	run := &SimulationRun{
+		ID:            "run_test_1",
+		ScenarioID:    tp.ID,
+		PlaybookTitle: "SSH Triage",
+		Alert:         tp.Alert,
+		Mode:          "sandbox",
+		Status:        "in_progress",
+		NodeStatuses:  map[string]string{},
+		NodeOutputs:   map[string]map[string]any{},
+		StartedAt:     time.Now().Add(-45 * time.Second),
+		Nodes: []Node{
+			{ID: "start", Type: "terminal", Label: "Start", Tool: "none"},
+			{ID: "n_vt", Type: "lookup", Label: "Check VT", Tool: "virustotal"},
+			{ID: "d1", Type: "decision", Label: "Malicious?", Tool: "none"},
+			{ID: "n_block", Type: "action", Label: "Block IP", Tool: "firewall_block"},
+			{ID: "n_end_mal", Type: "end", Label: "Close Escalated", Tool: "none"},
+			{ID: "n_end_clean", Type: "end", Label: "Close FP", Tool: "none"},
+		},
+		Edges: []Edge{
+			{ID: "e0", Source: "start", Target: "n_vt"},
+			{ID: "e1", Source: "n_vt", Target: "d1"},
+			{ID: "e2", Source: "d1", Target: "n_block", Label: "ใช่", Condition: &EdgeCondition{Field: "prev.malicious_count", Op: ">", Value: 5}},
+			{ID: "e3", Source: "n_block", Target: "n_end_mal"},
+			{ID: "e4", Source: "d1", Target: "n_end_clean", Label: "ไม่ใช่"},
+		},
+	}
+
+	// Cannot jump ahead to locked n_block before n_vt succeeds.
+	if _, _, err := ExecuteRunNode(run, "n_block", RunStepRequest{}, &fwTool, tp, false); err == nil {
+		t.Fatalf("expected locked node n_block to be rejected")
+	}
+
+	// Execute n_vt -> malicious_count=14 -> unlocks n_block and skips n_end_clean.
+	ev1, st1, err := ExecuteRunNode(run, "n_vt", RunStepRequest{}, &vtTool, tp, false)
+	if err != nil {
+		t.Fatalf("n_vt failed: %v", err)
+	}
+	if ev1.Action != "step_executed" || ev1.Status != "success" {
+		t.Fatalf("unexpected ev1: %+v", ev1)
+	}
+	if st1.NodeStates["n_block"].Availability != "ready" || st1.NodeStates["n_end_clean"].Availability != "skipped" {
+		t.Fatalf("unexpected graph state after n_vt: %+v", st1.NodeStates)
+	}
+
+	// Execute n_block -> reaches n_end_mal.
+	if _, st2, err := ExecuteRunNode(run, "n_block", RunStepRequest{}, &fwTool, tp, false); err != nil {
+		t.Fatalf("n_block failed: %v", err)
+	} else if st2.NodeStates["n_end_mal"].Availability != "ready" {
+		t.Fatalf("expected n_end_mal ready after n_block, got %+v", st2.NodeStates)
+	}
+
+	// Manual verdict step & secret input masking in audit event.
+	manualRun := &SimulationRun{
+		ID:           "run_manual_1",
+		Status:       "in_progress",
+		NodeStatuses: map[string]string{},
+		NodeOutputs:  map[string]map[string]any{},
+		Nodes:        []Node{{ID: "m1", Type: "lookup", Label: "Manual Check", Tool: "web_manual"}},
+	}
+	evM, _, err := ExecuteRunNode(manualRun, "m1", RunStepRequest{ManualVerdict: "suspicious", Notes: "Saw phishing form"}, manualTool, nil, false)
+	if err != nil {
+		t.Fatalf("manual node failed: %v", err)
+	}
+	if evM.Action != "manual_verdict" || evM.Verdict != "suspicious" || evM.Output["is_malicious"] != true {
+		t.Fatalf("unexpected manual event: %+v", evM)
+	}
+
+	// Score perfect TP run -> 100/100
+	run.FinalVerdict = "malicious"
+	perfect := ScoreSimulationRun(run, tp, time.Now())
+	if perfect.Total != 100 {
+		t.Fatalf("expected 100/100 score for complete TP run, got %+v", perfect)
+	}
+}
+
+func TestScoringSimulationRunDeductions(t *testing.T) {
+	tp := FindBuiltinScenario("ssh_brute_force_tp")
+	started := time.Now().Add(-600 * time.Second) // 600s > 300s max (>1.5x -> 0 speed pts)
+	run := &SimulationRun{
+		ID:           "run_partial",
+		ScenarioID:   tp.ID,
+		StartedAt:    started,
+		FinalVerdict: "suspicious", // partial match vs "malicious" -> 20/40
+		NodeStatuses: map[string]string{"n1": "success"},
+		NodeOutputs:  map[string]map[string]any{"n1": {"malicious_count": 14}},
+		Nodes: []Node{
+			{ID: "n1", Type: "lookup", Label: "Check VT", Tool: "virustotal"},
+			{ID: "n2", Type: "action", Label: "Block IP", Tool: "firewall_block"},
+			{ID: "n3", Type: "end", Label: "End", Tool: "none"},
+		},
+		Edges: []Edge{
+			{ID: "e1", Source: "n1", Target: "n2"},
+			{ID: "e2", Source: "n2", Target: "n3"},
+		},
+	}
+
+	sc := ScoreSimulationRun(run, tp, time.Now())
+	if sc.VerdictPoints != 20 {
+		t.Fatalf("expected 20 verdict pts for suspicious vs malicious, got %d", sc.VerdictPoints)
+	}
+	if len(sc.MissedNodes) != 1 || sc.MissedNodes[0] != "Block IP" {
+		t.Fatalf("expected MissedNodes=[Block IP], got %v", sc.MissedNodes)
+	}
+	if sc.PathPoints != 0 || sc.SpeedPoints != 0 {
+		t.Fatalf("expected 0 path and 0 speed pts, got path=%d speed=%d", sc.PathPoints, sc.SpeedPoints)
+	}
+	if sc.Total >= 60 {
+		t.Fatalf("expected low total score for incomplete slow run, got %+v", sc)
+	}
+}
