@@ -13,12 +13,13 @@ import (
 )
 
 type ApiHandler struct {
-	repo     *PlaybookRepository
-	toolRepo *ToolRepository
+	repo         *PlaybookRepository
+	toolRepo     *ToolRepository
+	scenarioRepo *ScenarioRepository
 }
 
-func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository) *ApiHandler {
-	return &ApiHandler{repo: repo, toolRepo: toolRepo}
+func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository, scenarioRepo *ScenarioRepository) *ApiHandler {
+	return &ApiHandler{repo: repo, toolRepo: toolRepo, scenarioRepo: scenarioRepo}
 }
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
@@ -36,6 +37,11 @@ func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/api/tools/test", h.TestToolDraft)
 	r.PUT("/api/tools/:id", h.UpdateTool)
 	r.DELETE("/api/tools/:id", h.DeleteTool)
+	r.GET("/api/scenarios", h.ListScenarios)
+	r.GET("/api/scenarios/:id", h.GetScenario)
+	r.POST("/api/scenarios", h.CreateScenario)
+	r.PUT("/api/scenarios/:id", h.UpdateScenario)
+	r.DELETE("/api/scenarios/:id", h.DeleteScenario)
 	r.POST("/api/execute", RateLimitMiddleware(executeLimiter), h.ExecuteStep)
 	r.POST("/api/export/bpmn", h.ExportBpmn)
 	r.POST("/api/export/cacao", h.ExportCacao)
@@ -313,6 +319,147 @@ func (h *ApiHandler) DeletePlaybook(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
 }
 
+func shouldHideScenarioAnswers(c *gin.Context) bool {
+	raw := strings.ToLower(strings.TrimSpace(c.Query("hide_answers")))
+	return raw == "true" || raw == "1" || raw == "yes"
+}
+
+func (h *ApiHandler) ListScenarios(c *gin.Context) {
+	hideAnswers := shouldHideScenarioAnswers(c)
+	if h.scenarioRepo == nil {
+		items := DefaultBuiltinScenarios()
+		if hideAnswers {
+			for i := range items {
+				items[i] = StripScenarioAnswers(items[i])
+			}
+		}
+		c.JSON(http.StatusOK, items)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	items, err := h.scenarioRepo.ListAll(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงรายการ Scenarios จาก MongoDB ไม่สำเร็จ"})
+		return
+	}
+	if hideAnswers {
+		for i := range items {
+			items[i] = StripScenarioAnswers(items[i])
+		}
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (h *ApiHandler) GetScenario(c *gin.Context) {
+	id := c.Param("id")
+	hideAnswers := shouldHideScenarioAnswers(c)
+	if h.scenarioRepo == nil {
+		if s := FindBuiltinScenario(id); s != nil {
+			out := *s
+			if hideAnswers {
+				out = StripScenarioAnswers(out)
+			}
+			c.JSON(http.StatusOK, out)
+			return
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Scenario นี้"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	item, err := h.scenarioRepo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrScenarioNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Scenario นี้"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ดึงข้อมูล Scenario ไม่สำเร็จ"})
+		return
+	}
+	out := *item
+	if hideAnswers {
+		out = StripScenarioAnswers(out)
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *ApiHandler) CreateScenario(c *gin.Context) {
+	var input Scenario
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูล Scenario ไม่ถูกต้อง"})
+		return
+	}
+	if h.scenarioRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Scenario repository ยังไม่พร้อมใช้งาน"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	created, err := h.scenarioRepo.Create(ctx, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidScenario):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, ErrScenarioAlreadyExists):
+			c.JSON(http.StatusConflict, gin.H{"error": "Scenario ID นี้มีอยู่แล้ว"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "สร้าง Scenario ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
+
+func (h *ApiHandler) UpdateScenario(c *gin.Context) {
+	var input Scenario
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ข้อมูล Scenario ไม่ถูกต้อง"})
+		return
+	}
+	if h.scenarioRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Scenario repository ยังไม่พร้อมใช้งาน"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	updated, err := h.scenarioRepo.Update(ctx, c.Param("id"), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScenarioNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Scenario นี้"})
+		case errors.Is(err, ErrInvalidScenario):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "อัปเดต Scenario ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *ApiHandler) DeleteScenario(c *gin.Context) {
+	if h.scenarioRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Scenario repository ยังไม่พร้อมใช้งาน"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	id := c.Param("id")
+	if err := h.scenarioRepo.Delete(ctx, id); err != nil {
+		switch {
+		case errors.Is(err, ErrScenarioNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบ Scenario นี้"})
+		case errors.Is(err, ErrBuiltinScenarioProtected):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่สามารถลบ Built-in Scenario ได้"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ลบ Scenario ไม่สำเร็จ"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": id})
+}
+
 func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 	var req ExecutionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -332,7 +479,21 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		c.JSON(http.StatusOK, RunLiveHTTPStep(req, toolDef))
 		return
 	}
-	c.JSON(http.StatusOK, RunSandboxStep(req, toolDef))
+
+	var scenario *Scenario
+	if scenarioID := strings.TrimSpace(req.ScenarioID); scenarioID != "" {
+		if h.scenarioRepo != nil {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+			defer cancel()
+			if s, err := h.scenarioRepo.GetByID(ctx, scenarioID); err == nil {
+				scenario = s
+			}
+		}
+		if scenario == nil {
+			scenario = FindBuiltinScenario(scenarioID)
+		}
+	}
+	c.JSON(http.StatusOK, RunSandboxStepWithScenario(req, toolDef, scenario))
 }
 
 func (h *ApiHandler) ExportBpmn(c *gin.Context) {
