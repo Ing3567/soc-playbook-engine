@@ -5,112 +5,151 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
-var listBulletPrefix = regexp.MustCompile(`^\s*(\d+[\.\)]|[-*•●○▪])\s*`)
-
-func parseXmlIntAttribute(element xml.StartElement, name string) int {
-	for _, attr := range element.Attr {
-		if attr.Name.Local == name {
-			v, _ := strconv.Atoi(attr.Value)
-			return v
-		}
-	}
-	return 0
+type docxRelationships struct {
+	Relationships []docxRelationship `xml:"Relationship"`
 }
 
-func ExtractLinesFromDocx(data []byte) ([]Line, error) {
-	zipReader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+type docxRelationship struct {
+	ID         string `xml:"Id,attr"`
+	Target     string `xml:"Target,attr"`
+	TargetMode string `xml:"TargetMode,attr"`
+}
+
+func ExtractDocxText(data []byte) (string, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, errors.New("not a docx")
+		return "", err
 	}
-	var docFile *zip.File
-	for _, f := range zipReader.File {
-		if f.Name == "word/document.xml" {
-			docFile = f
+
+	hyperlinkTargets := loadHyperlinkTargets(reader.File)
+
+	for _, file := range reader.File {
+		if file.Name == "word/document.xml" {
+			rc, openErr := file.Open()
+			if openErr != nil {
+				return "", openErr
+			}
+			defer rc.Close()
+			return parseDocumentXML(rc, hyperlinkTargets)
 		}
 	}
-	if docFile == nil {
-		return nil, errors.New("word/document.xml not found")
-	}
-	reader, err := docFile.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
 
-	decoder := xml.NewDecoder(io.LimitReader(reader, 20<<20))
-	var lines []Line
-	var textBuffer strings.Builder
-	level, hasListLevel, inTextTag := 0, false, false
+	return "", errors.New("word/document.xml not found in docx")
+}
+
+func loadHyperlinkTargets(files []*zip.File) map[string]string {
+	targets := make(map[string]string)
+
+	for _, file := range files {
+		if file.Name != "word/_rels/document.xml.rels" {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return targets
+		}
+		defer rc.Close()
+
+		var rels docxRelationships
+		if decodeErr := xml.NewDecoder(rc).Decode(&rels); decodeErr != nil {
+			return targets
+		}
+
+		for _, rel := range rels.Relationships {
+			trimmed := strings.TrimSpace(rel.Target)
+			if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+				targets[rel.ID] = trimmed
+			}
+		}
+	}
+
+	return targets
+}
+
+func parseDocumentXML(reader io.Reader, hyperlinkTargets map[string]string) (string, error) {
+	decoder := xml.NewDecoder(reader)
+	var paragraphs []string
+	var paragraphBuilder strings.Builder
+	var hyperlinkBuilder strings.Builder
+	inHyperlink := false
+	activeRelID := ""
 
 	for {
-		token, err := decoder.Token()
+		tok, err := decoder.Token()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			switch t.Name.Local {
-			case "p":
-				textBuffer.Reset()
-				level, hasListLevel = 0, false
-			case "ilvl":
-				level, hasListLevel = parseXmlIntAttribute(t, "val"), true
-			case "ind":
-				if !hasListLevel {
-					left := parseXmlIntAttribute(t, "left")
-					if s := parseXmlIntAttribute(t, "start"); s > left {
-						left = s
-					}
-					level = left / 360
-				}
-			case "t":
-				inTextTag = true
-			}
-		case xml.CharData:
-			if inTextTag {
-				textBuffer.Write(t)
-			}
-		case xml.EndElement:
-			switch t.Name.Local {
-			case "t":
-				inTextTag = false
-			case "p":
-				cleaned := strings.TrimSpace(listBulletPrefix.ReplaceAllString(textBuffer.String(), ""))
-				if cleaned != "" {
-					lines = append(lines, Line{Level: level, Text: cleaned})
-				}
-			}
-		}
-	}
-	return lines, nil
-}
 
-func ExtractLinesFromText(raw string) []Line {
-	var lines []Line
-	for _, rawLine := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
-		spaces := 0
-		for _, ch := range rawLine {
-			if ch == ' ' {
-				spaces++
-			} else if ch == '\t' {
-				spaces += 4
-			} else {
-				break
+		switch element := tok.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "hyperlink":
+				inHyperlink = true
+				activeRelID = ""
+				hyperlinkBuilder.Reset()
+				for _, attr := range element.Attr {
+					if attr.Name.Local == "id" {
+						activeRelID = attr.Value
+						break
+					}
+				}
+			case "t":
+				var text string
+				if decodeErr := decoder.DecodeElement(&text, &element); decodeErr != nil {
+					return "", decodeErr
+				}
+				if inHyperlink {
+					hyperlinkBuilder.WriteString(text)
+				} else {
+					paragraphBuilder.WriteString(text)
+				}
+			case "br", "cr":
+				if inHyperlink {
+					hyperlinkBuilder.WriteString(" ")
+				} else {
+					paragraphBuilder.WriteString("\n")
+				}
+			case "tab":
+				if !inHyperlink {
+					paragraphBuilder.WriteString("\t")
+				}
+			}
+
+		case xml.EndElement:
+			switch element.Name.Local {
+			case "hyperlink":
+				label := strings.TrimSpace(hyperlinkBuilder.String())
+				targetURL := hyperlinkTargets[activeRelID]
+				if targetURL != "" {
+					if label != "" && !strings.Contains(label, targetURL) {
+						paragraphBuilder.WriteString(fmt.Sprintf("%s %s", label, targetURL))
+					} else {
+						paragraphBuilder.WriteString(targetURL)
+					}
+				} else if label != "" {
+					paragraphBuilder.WriteString(label)
+				}
+				inHyperlink = false
+				activeRelID = ""
+				hyperlinkBuilder.Reset()
+
+			case "p":
+				line := strings.TrimSpace(paragraphBuilder.String())
+				if line != "" {
+					paragraphs = append(paragraphs, line)
+				}
+				paragraphBuilder.Reset()
 			}
 		}
-		cleaned := strings.TrimSpace(listBulletPrefix.ReplaceAllString(strings.TrimSpace(rawLine), ""))
-		if cleaned != "" {
-			lines = append(lines, Line{Level: spaces / 2, Text: cleaned})
-		}
 	}
-	return lines
+
+	return strings.Join(paragraphs, "\n"), nil
 }
