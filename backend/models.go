@@ -30,11 +30,18 @@ type Node struct {
 	InputPayload map[string]string `json:"input_payload,omitempty" bson:"input_payload,omitempty"`
 }
 
+type EdgeCondition struct {
+	Field string `json:"field" bson:"field"`
+	Op    string `json:"op" bson:"op"`
+	Value any    `json:"value,omitempty" bson:"value,omitempty"`
+}
+
 type Edge struct {
-	ID     string `json:"id" bson:"id"`
-	Source string `json:"source" bson:"source"`
-	Target string `json:"target" bson:"target"`
-	Label  string `json:"label,omitempty" bson:"label,omitempty"`
+	ID        string         `json:"id" bson:"id"`
+	Source    string         `json:"source" bson:"source"`
+	Target    string         `json:"target" bson:"target"`
+	Label     string         `json:"label,omitempty" bson:"label,omitempty"`
+	Condition *EdgeCondition `json:"condition,omitempty" bson:"condition,omitempty"`
 }
 
 type PlaybookDocument struct {
@@ -45,6 +52,27 @@ type PlaybookDocument struct {
 	Nodes     []Node    `json:"nodes" bson:"nodes"`
 	Edges     []Edge    `json:"edges" bson:"edges"`
 	UpdatedAt time.Time `json:"updated_at" bson:"updated_at"`
+}
+
+type ScenarioGroundTruth struct {
+	ExpectedVerdict string   `json:"expected_verdict" bson:"expected_verdict"`
+	RequiredNodes   []string `json:"required_nodes,omitempty" bson:"required_nodes,omitempty"`
+	ExpectedEdges   []string `json:"expected_edges,omitempty" bson:"expected_edges,omitempty"`
+	MaxDurationSec  int      `json:"max_duration_sec,omitempty" bson:"max_duration_sec,omitempty"`
+}
+
+type Scenario struct {
+	ID          string                               `json:"id" bson:"_id"`
+	Title       string                               `json:"title" bson:"title"`
+	Description string                               `json:"description" bson:"description"`
+	Difficulty  string                               `json:"difficulty" bson:"difficulty"`
+	PlaybookID  string                               `json:"playbook_id,omitempty" bson:"playbook_id,omitempty"`
+	Alert       map[string]any                       `json:"alert" bson:"alert"`
+	ToolMocks   map[string]map[string]map[string]any `json:"tool_mocks,omitempty" bson:"tool_mocks,omitempty"`
+	GroundTruth *ScenarioGroundTruth                 `json:"ground_truth,omitempty" bson:"ground_truth,omitempty"`
+	IsBuiltin   bool                                 `json:"is_builtin" bson:"is_builtin"`
+	CreatedAt   time.Time                            `json:"created_at" bson:"created_at"`
+	UpdatedAt   time.Time                            `json:"updated_at" bson:"updated_at"`
 }
 
 type ExecutionRequest struct {
@@ -59,6 +87,7 @@ type ExecutionRequest struct {
 	RuntimeContext map[string]any    `json:"runtime_context,omitempty"`
 	RuntimeAuth    string            `json:"runtime_auth,omitempty"`
 	ExecutionMode  string            `json:"execution_mode,omitempty"`
+	ScenarioID     string            `json:"scenario_id,omitempty"`
 }
 
 type ExecutionResult struct {
