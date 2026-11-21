@@ -12,8 +12,25 @@ import {
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 
-import type { FlowNode, FlowEdge, NodeImage, PlaybookItem, RunStatus, ExecutionLog } from './types'
-import { generateFlowchart, getPlaybooks, savePlaybook, deletePlaybook, executeStep, downloadExportFile } from './api'
+import type {
+  FlowNode,
+  FlowEdge,
+  NodeImage,
+  PlaybookItem,
+  RunStatus,
+  ExecutionLog,
+  ToolInputField,
+  ToolStatusSummary,
+} from './types'
+import {
+  getTools,
+  generateFlowchart,
+  getPlaybooks,
+  savePlaybook,
+  deletePlaybook,
+  executeStep,
+  downloadExportFile,
+} from './api'
 import { FlowNodeCard } from './FlowNodeCard'
 
 const nodeTypes = { socNode: FlowNodeCard }
@@ -28,14 +45,31 @@ const SAMPLE_SOP = `ตรวจสอบ IP การเข้าระบบ�
   เฝ้าระวังพฤติกรรม 24 ชั่วโมง
 บันทึกผลลงระบบ Ticket`
 
-function estimateNodeDimensions(n: FlowNode): { width: number; height: number } {
+function buildInitialNodeInputs(nodes: FlowNode[]): Record<string, Record<string, string>> {
+  const next: Record<string, Record<string, string>> = {}
+  for (const n of nodes) {
+    const splunkLink = (n.links || []).find((l) => l.splunk_query)
+    if (splunkLink?.splunk_query) {
+      next[n.id] = { query: splunkLink.splunk_query }
+    }
+  }
+  return next
+}
+
+function estimateNodeDimensions(n: FlowNode, inputFields: ToolInputField[]): { width: number; height: number } {
   const links = n.links || []
   const images = n.images || []
-  const hasAssets = links.length > 0 || images.length > 0
-  const width = hasAssets ? 260 : 230
+  const canRun = n.type === 'lookup' || n.type === 'action'
+  const fieldCount = canRun ? inputFields.length : 0
+  const hasRichContent = links.length > 0 || images.length > 0 || fieldCount > 0
+  const width = hasRichContent ? 260 : 230
 
   const extraTextLines = Math.max(0, Math.ceil((n.label || '').length / 30) - 2)
   let height = 86 + extraTextLines * 16
+
+  if (fieldCount > 0) {
+    height += 12 + fieldCount * 42
+  }
 
   if (links.length > 0) {
     height += 12
@@ -55,8 +89,11 @@ function estimateNodeDimensions(n: FlowNode): { width: number; height: number } 
 function buildGraphLayout(
   nodes: FlowNode[],
   edges: FlowEdge[],
+  toolsById: Record<string, ToolStatusSummary>,
   statuses: Record<string, RunStatus>,
+  nodeInputs: Record<string, Record<string, string>>,
   onRunNode: (id: string) => void,
+  onInputChange: (nodeId: string, key: string, value: string) => void,
   onPreviewImage: (img: NodeImage) => void
 ) {
   const g = new dagre.graphlib.Graph()
@@ -65,7 +102,8 @@ function buildGraphLayout(
 
   const dimsById: Record<string, { width: number; height: number }> = {}
   nodes.forEach((n) => {
-    const dims = estimateNodeDimensions(n)
+    const fields = toolsById[n.tool]?.input_fields || []
+    const dims = estimateNodeDimensions(n, fields)
     dimsById[n.id] = dims
     g.setNode(n.id, dims)
   })
@@ -75,6 +113,7 @@ function buildGraphLayout(
   const rfNodes: RFNode[] = nodes.map((n) => {
     const pos = g.node(n.id)
     const dims = dimsById[n.id] || { width: 230, height: 86 }
+    const fields = toolsById[n.tool]?.input_fields || []
     return {
       id: n.id,
       type: 'socNode',
@@ -82,7 +121,10 @@ function buildGraphLayout(
       data: {
         ...n,
         status: statuses[n.id] || 'idle',
+        inputFields: fields,
+        inputValues: nodeInputs[n.id] || {},
         onRun: () => onRunNode(n.id),
+        onInputChange: (key: string, value: string) => onInputChange(n.id, key, value),
         onPreviewImage,
       },
     }
@@ -109,25 +151,29 @@ export default function App() {
   const [nodes, setNodes] = useState<FlowNode[]>([])
   const [edges, setEdges] = useState<FlowEdge[]>([])
   const [savedList, setSavedList] = useState<PlaybookItem[]>([])
+  const [toolsById, setToolsById] = useState<Record<string, ToolStatusSummary>>({})
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({})
+  const [nodeInputs, setNodeInputs] = useState<Record<string, Record<string, string>>>({})
   const [logs, setLogs] = useState<ExecutionLog[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [previewImage, setPreviewImage] = useState<NodeImage | null>(null)
-  const [targetIp, setTargetIp] = useState('')
-  const [searchQuery, setSearchQuery] = useState('')
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([])
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([])
 
   const nodesRef = useRef<FlowNode[]>([])
-  const runInputsRef = useRef<{ ip: string; query: string }>({ ip: '', query: '' })
+  const statusesRef = useRef<Record<string, RunStatus>>({})
+  const nodeInputsRef = useRef<Record<string, Record<string, string>>>({})
   useEffect(() => {
     nodesRef.current = nodes
   }, [nodes])
   useEffect(() => {
-    runInputsRef.current = { ip: targetIp.trim(), query: searchQuery.trim() }
-  }, [targetIp, searchQuery])
+    statusesRef.current = statuses
+  }, [statuses])
+  useEffect(() => {
+    nodeInputsRef.current = nodeInputs
+  }, [nodeInputs])
 
   const reloadPlaybooks = useCallback(async () => {
     setSavedList(await getPlaybooks())
@@ -137,6 +183,14 @@ export default function App() {
     let active = true
     void getPlaybooks().then((items) => {
       if (active) setSavedList(items)
+    })
+    void getTools().then((tools) => {
+      if (!active) return
+      const map: Record<string, ToolStatusSummary> = {}
+      for (const t of tools) {
+        map[t.id] = t
+      }
+      setToolsById(map)
     })
     return () => {
       active = false
@@ -152,14 +206,27 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [previewImage])
 
+  const handleNodeInputChange = useCallback((nodeId: string, key: string, value: string) => {
+    setNodeInputs((prev) => ({
+      ...prev,
+      [nodeId]: {
+        ...(prev[nodeId] || {}),
+        [key]: value,
+      },
+    }))
+  }, [])
+
   const runNode = useCallback(async (nodeId: string) => {
     const target = nodesRef.current.find((n) => n.id === nodeId)
     if (!target) return
     setStatuses((prev) => ({ ...prev, [nodeId]: 'running' }))
     try {
+      const rawInputs = nodeInputsRef.current[nodeId] || {}
       const inputs: Record<string, string> = {}
-      if (runInputsRef.current.ip) inputs.ip = runInputsRef.current.ip
-      if (runInputsRef.current.query) inputs.query = runInputsRef.current.query
+      for (const [k, v] of Object.entries(rawInputs)) {
+        const trimmed = v.trim()
+        if (trimmed) inputs[k] = trimmed
+      }
       const res = await executeStep(target, inputs)
       const nextStatus: RunStatus = res.status === 'failed' ? 'failed' : 'success'
       setStatuses((prev) => ({ ...prev, [nodeId]: nextStatus }))
@@ -181,28 +248,48 @@ export default function App() {
     }
   }, [])
 
+  // Structural Dagre layout only runs when graph nodes/edges or tool schemas change
   useEffect(() => {
     if (nodes.length === 0) return
     const { rfNodes: nextN, rfEdges: nextE } = buildGraphLayout(
       nodes,
       edges,
-      statuses,
+      toolsById,
+      statusesRef.current,
+      nodeInputsRef.current,
       runNode,
+      handleNodeInputChange,
       setPreviewImage
     )
     setRfNodes(nextN)
     setRfEdges(nextE)
-  }, [nodes, edges, statuses, runNode, setRfNodes, setRfEdges])
+  }, [nodes, edges, toolsById, runNode, handleNodeInputChange, setRfNodes, setRfEdges])
+
+  // Lightweight state sync for statuses and inline node inputs without re-running Dagre
+  useEffect(() => {
+    setRfNodes((prev) =>
+      prev.map((rfNode) => ({
+        ...rfNode,
+        data: {
+          ...rfNode.data,
+          status: statuses[rfNode.id] || 'idle',
+          inputValues: nodeInputs[rfNode.id] || {},
+        },
+      }))
+    )
+  }, [statuses, nodeInputs, setRfNodes])
 
   async function submitGenerate(form: FormData, nextTitle?: string) {
     setLoading(true)
     setError('')
     try {
       const data = await generateFlowchart(form)
-      setNodes(data.nodes || [])
+      const nextNodes = data.nodes || []
+      setNodes(nextNodes)
       setEdges(data.edges || [])
       setEngine(data.engine || '-')
       setStatuses({})
+      setNodeInputs(buildInitialNodeInputs(nextNodes))
       if (nextTitle) setTitle(nextTitle)
       return data
     } catch (e) {
@@ -262,6 +349,8 @@ export default function App() {
               setSopId('')
               setTitle('New SOP')
               setText(SAMPLE_SOP)
+              setNodeInputs({})
+              setStatuses({})
             }}
             className="text-xs text-blue-600 hover:underline"
           >
@@ -289,24 +378,6 @@ export default function App() {
         />
 
         {error && <div className="rounded bg-rose-50 p-2 text-xs text-rose-700 border border-rose-200">{error}</div>}
-
-        <div className="rounded border border-slate-200 bg-slate-50 p-2 space-y-1.5">
-          <div className="text-[11px] font-bold text-slate-700">Run Inputs (Optional)</div>
-          <input
-            type="text"
-            value={targetIp}
-            onChange={(e) => setTargetIp(e.target.value)}
-            className="w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono text-[11px]"
-            placeholder="Target IP (เช่น 185.220.101.42)"
-          />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono text-[11px]"
-            placeholder="Search Query / Keyword"
-          />
-        </div>
 
         <div className="grid grid-cols-2 gap-1.5">
           <button
@@ -379,13 +450,15 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    const loadedNodes = item.nodes || []
                     setSopId(item.id)
                     setTitle(item.title)
                     setText(item.raw_text)
                     setEngine(item.engine)
-                    setNodes(item.nodes || [])
+                    setNodes(loadedNodes)
                     setEdges(item.edges || [])
                     setStatuses({})
+                    setNodeInputs(buildInitialNodeInputs(loadedNodes))
                   }}
                   className="truncate text-left flex-1 font-medium hover:text-blue-600"
                 >
