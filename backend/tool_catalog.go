@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -19,12 +20,15 @@ var (
 	toolIDRegex         = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	nonSlugCharsRegex   = regexp.MustCompile(`[^a-z0-9_-]+`)
 	multiUnderscoreRx   = regexp.MustCompile(`_+`)
+	envVarNameRegex     = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 	reservedToolIDs     = map[string]bool{"none": true, "manual_lookup": true, "manual_action": true}
 	validToolCategories = map[string]bool{"lookup": true, "action": true}
 	validCommandTypes   = map[string]bool{"http-api": true, "manual": true, "bash": true, "ssh": true}
 	validHTTPMethods    = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELETE": true}
 	validPayloadModes   = map[string]bool{"fixed": true, "dynamic": true}
 	validParamLocations = map[string]bool{"path": true, "query": true, "body": true, "header": true}
+	validAuthTypes      = map[string]bool{"none": true, "api_key": true, "bearer": true, "basic": true}
+	validAuthLocations  = map[string]bool{"header": true, "query": true}
 )
 
 func DefaultBuiltinTools() []ToolDefinition {
@@ -39,6 +43,13 @@ func DefaultBuiltinTools() []ToolDefinition {
 			HTTPMethod:  "GET",
 			Endpoint:    "https://www.virustotal.com/api/v3/ip_addresses/{{ip}}",
 			PayloadMode: "dynamic",
+			Auth: &ToolAuth{
+				Type:         "api_key",
+				In:           "header",
+				KeyName:      "x-apikey",
+				EnvVar:       "VT_API_KEY",
+				AllowRuntime: true,
+			},
 			Params: []ToolParameter{
 				{Key: "ip", Label: "Target IP", In: "path", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
 			},
@@ -55,6 +66,13 @@ func DefaultBuiltinTools() []ToolDefinition {
 			HTTPMethod:  "GET",
 			Endpoint:    "https://api.abuseipdb.com/api/v2/check",
 			PayloadMode: "dynamic",
+			Auth: &ToolAuth{
+				Type:         "api_key",
+				In:           "header",
+				KeyName:      "Key",
+				EnvVar:       "ABUSEIPDB_API_KEY",
+				AllowRuntime: true,
+			},
 			Params: []ToolParameter{
 				{Key: "ipAddress", Label: "IP Address", In: "query", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
 				{Key: "maxAgeInDays", Label: "Max Age (Days)", In: "query", Mode: "fixed", Value: "90", DefaultValue: "90"},
@@ -72,6 +90,14 @@ func DefaultBuiltinTools() []ToolDefinition {
 			HTTPMethod:  "GET",
 			Endpoint:    "/rest/api/3/search",
 			PayloadMode: "dynamic",
+			Auth: &ToolAuth{
+				Type:         "bearer",
+				In:           "header",
+				KeyName:      "Authorization",
+				Prefix:       "Bearer ",
+				EnvVar:       "JIRA_API_TOKEN",
+				AllowRuntime: true,
+			},
 			Params: []ToolParameter{
 				{Key: "jql", Label: "JQL Filter", In: "query", Mode: "dynamic", Value: `text ~ "{{alert.src_ip}}"`, Required: true},
 				{Key: "maxResults", Label: "Max Results", In: "query", Mode: "fixed", Value: "10", DefaultValue: "10"},
@@ -89,6 +115,13 @@ func DefaultBuiltinTools() []ToolDefinition {
 			HTTPMethod:  "POST",
 			Endpoint:    "/api/firewall/block",
 			PayloadMode: "dynamic",
+			Auth: &ToolAuth{
+				Type:         "api_key",
+				In:           "header",
+				KeyName:      "X-API-Key",
+				EnvVar:       "FIREWALL_API_KEY",
+				AllowRuntime: true,
+			},
 			Params: []ToolParameter{
 				{Key: "ip", Label: "Block IP", In: "body", Mode: "dynamic", Value: "{{alert.src_ip}}", Required: true},
 				{Key: "action", Label: "Action", In: "body", Mode: "fixed", Value: "deny"},
@@ -106,6 +139,14 @@ func DefaultBuiltinTools() []ToolDefinition {
 			HTTPMethod:  "POST",
 			Endpoint:    "/rest/api/3/issue",
 			PayloadMode: "dynamic",
+			Auth: &ToolAuth{
+				Type:         "bearer",
+				In:           "header",
+				KeyName:      "Authorization",
+				Prefix:       "Bearer ",
+				EnvVar:       "JIRA_API_TOKEN",
+				AllowRuntime: true,
+			},
 			Params: []ToolParameter{
 				{Key: "summary", Label: "Ticket Summary", In: "body", Mode: "dynamic", Value: "SOC Alert for {{alert.src_ip}}", Required: true},
 				{Key: "priority", Label: "Priority", In: "body", Mode: "fixed", Value: "High"},
@@ -243,11 +284,93 @@ func NormalizeAndValidateTool(tool ToolDefinition, isCreate bool) (ToolDefinitio
 	}
 	tool.Params = cleanedParams
 
+	normalizedAuth, err := NormalizeAndValidateToolAuth(tool.Auth)
+	if err != nil {
+		return tool, err
+	}
+	tool.Auth = normalizedAuth
+	PopulateToolAuthStatus(&tool)
+
 	return tool, nil
 }
 
+func NormalizeAndValidateToolAuth(auth *ToolAuth) (*ToolAuth, error) {
+	if auth == nil {
+		return nil, nil
+	}
+	cleaned := *auth
+	cleaned.Type = strings.ToLower(strings.TrimSpace(cleaned.Type))
+	if cleaned.Type == "" || cleaned.Type == "none" {
+		return &ToolAuth{Type: "none"}, nil
+	}
+	if !validAuthTypes[cleaned.Type] {
+		return nil, fmt.Errorf("%w: auth.type must be none, api_key, bearer, or basic", ErrInvalidTool)
+	}
+
+	cleaned.In = strings.ToLower(strings.TrimSpace(cleaned.In))
+	cleaned.KeyName = strings.TrimSpace(cleaned.KeyName)
+	cleaned.Prefix = strings.TrimSpace(cleaned.Prefix)
+	cleaned.EnvVar = strings.ToUpper(strings.TrimSpace(cleaned.EnvVar))
+
+	switch cleaned.Type {
+	case "api_key":
+		if cleaned.In == "" {
+			cleaned.In = "header"
+		}
+		if !validAuthLocations[cleaned.In] {
+			return nil, fmt.Errorf("%w: auth.in must be header or query", ErrInvalidTool)
+		}
+		if cleaned.KeyName == "" {
+			cleaned.KeyName = "X-API-Key"
+		}
+		if cleaned.Prefix != "" {
+			cleaned.Prefix += " "
+		}
+	case "bearer":
+		cleaned.In = "header"
+		if cleaned.KeyName == "" {
+			cleaned.KeyName = "Authorization"
+		}
+		if cleaned.Prefix == "" {
+			cleaned.Prefix = "Bearer "
+		} else {
+			cleaned.Prefix += " "
+		}
+	case "basic":
+		cleaned.In = "header"
+		if cleaned.KeyName == "" {
+			cleaned.KeyName = "Authorization"
+		}
+		if cleaned.Prefix == "" {
+			cleaned.Prefix = "Basic "
+		} else {
+			cleaned.Prefix += " "
+		}
+	}
+
+	if cleaned.EnvVar != "" && !envVarNameRegex.MatchString(cleaned.EnvVar) {
+		return nil, fmt.Errorf("%w: auth.env_var must match ^[A-Z][A-Z0-9_]*$ (e.g. VT_API_KEY)", ErrInvalidTool)
+	}
+	if cleaned.EnvVar == "" && !cleaned.AllowRuntime {
+		return nil, fmt.Errorf("%w: auth requires either env_var or allow_runtime", ErrInvalidTool)
+	}
+
+	return &cleaned, nil
+}
+
+func PopulateToolAuthStatus(tool *ToolDefinition) {
+	if tool == nil {
+		return
+	}
+	if tool.Auth == nil || tool.Auth.Type == "" || tool.Auth.Type == "none" {
+		tool.AuthConfigured = false
+		return
+	}
+	tool.AuthConfigured = tool.Auth.EnvVar != "" && strings.TrimSpace(os.Getenv(tool.Auth.EnvVar)) != ""
+}
+
 // SanitizePlaybookForSave ensures SOP blueprints persist only fixed parameters and
-// template expressions (e.g. {{alert.src_ip}}, {{prev.verdict}}), never raw runtime customer inputs.
+// template expressions (e.g. {{alert.src_ip}}, {{prev.verdict}}), never raw runtime customer inputs or secrets.
 func SanitizePlaybookForSave(doc PlaybookDocument, toolMap map[string]ToolDefinition) PlaybookDocument {
 	if len(doc.Nodes) == 0 {
 		return doc
@@ -276,6 +399,21 @@ func SanitizePlaybookForSave(doc PlaybookDocument, toolMap map[string]ToolDefini
 		if len(n.InputPayload) > 0 {
 			cleanedPayload := make(map[string]string)
 			for k, v := range n.InputPayload {
+				if hasTool {
+					if toolDef.Auth != nil && toolDef.Auth.KeyName != "" && strings.EqualFold(toolDef.Auth.KeyName, k) {
+						continue
+					}
+					isSecretParam := false
+					for _, p := range toolDef.Params {
+						if p.Key == k && p.IsSecret {
+							isSecretParam = true
+							break
+						}
+					}
+					if isSecretParam {
+						continue
+					}
+				}
 				mode := ""
 				if copyNode.ParamModes != nil {
 					mode = copyNode.ParamModes[k]

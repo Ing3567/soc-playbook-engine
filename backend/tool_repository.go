@@ -72,6 +72,18 @@ func (r *ToolRepository) EnsureBuiltinTools(ctx context.Context) error {
 		if _, err := r.collection.UpdateOne(ctx, backfillFilter, backfillUpdate); err != nil {
 			return err
 		}
+		if tool.Auth != nil {
+			authBackfillFilter := bson.M{
+				"_id":  tool.ID,
+				"auth": bson.M{"$exists": false},
+			}
+			authBackfillUpdate := bson.M{
+				"$set": bson.M{"auth": tool.Auth},
+			}
+			if _, err := r.collection.UpdateOne(ctx, authBackfillFilter, authBackfillUpdate); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

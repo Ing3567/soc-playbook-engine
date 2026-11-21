@@ -1,13 +1,33 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 )
 
 var placeholderRegex = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}`)
+
+type AuthSummary struct {
+	Type          string `json:"type"`
+	In            string `json:"in,omitempty"`
+	KeyName       string `json:"key_name,omitempty"`
+	EnvVar        string `json:"env_var,omitempty"`
+	Source        string `json:"source"`
+	Configured    bool   `json:"configured"`
+	MaskedPreview string `json:"masked_preview,omitempty"`
+}
+
+type ResolvedAuth struct {
+	Summary     AuthSummary
+	headerKey   string
+	headerValue string
+	queryKey    string
+	queryValue  string
+}
 
 type ResolvedToolRequest struct {
 	Method          string            `json:"method"`
@@ -16,7 +36,115 @@ type ResolvedToolRequest struct {
 	Params          map[string]string `json:"params,omitempty"`
 	Headers         map[string]string `json:"headers,omitempty"`
 	Body            map[string]any    `json:"body,omitempty"`
+	Auth            *AuthSummary      `json:"auth,omitempty"`
 	MissingRequired []string          `json:"missing_required,omitempty"`
+	rawHeaders      map[string]string
+	rawQuery        map[string]string
+	rawBody         map[string]any
+}
+
+func ResolveToolAuth(tool *ToolDefinition, runtimeAuth string) ResolvedAuth {
+	if tool == nil || tool.Auth == nil {
+		return ResolvedAuth{Summary: AuthSummary{Type: "none", Source: "none", Configured: false}}
+	}
+	authType := strings.ToLower(strings.TrimSpace(tool.Auth.Type))
+	if authType == "" || authType == "none" {
+		return ResolvedAuth{Summary: AuthSummary{Type: "none", Source: "none", Configured: false}}
+	}
+
+	in := strings.ToLower(strings.TrimSpace(tool.Auth.In))
+	keyName := strings.TrimSpace(tool.Auth.KeyName)
+	prefix := tool.Auth.Prefix
+	envVar := strings.ToUpper(strings.TrimSpace(tool.Auth.EnvVar))
+
+	switch authType {
+	case "api_key":
+		if in == "" {
+			in = "header"
+		}
+		if keyName == "" {
+			keyName = "X-API-Key"
+		}
+	case "bearer":
+		in = "header"
+		if keyName == "" {
+			keyName = "Authorization"
+		}
+		if strings.TrimSpace(prefix) == "" {
+			prefix = "Bearer "
+		}
+	case "basic":
+		in = "header"
+		if keyName == "" {
+			keyName = "Authorization"
+		}
+		if strings.TrimSpace(prefix) == "" {
+			prefix = "Basic "
+		}
+	}
+
+	rawSecret := ""
+	source := "missing"
+	if envVar != "" {
+		if envVal := strings.TrimSpace(os.Getenv(envVar)); envVal != "" {
+			rawSecret = envVal
+			source = "env"
+		}
+	}
+	if rawSecret == "" && tool.Auth.AllowRuntime {
+		if rt := strings.TrimSpace(runtimeAuth); rt != "" {
+			rawSecret = rt
+			source = "runtime"
+		}
+	}
+
+	summary := AuthSummary{
+		Type:       authType,
+		In:         in,
+		KeyName:    keyName,
+		EnvVar:     envVar,
+		Source:     source,
+		Configured: rawSecret != "",
+	}
+	if in == "query" {
+		summary.MaskedPreview = fmt.Sprintf("?%s=***", keyName)
+	} else {
+		summary.MaskedPreview = fmt.Sprintf("%s: %s***", keyName, prefix)
+	}
+
+	if rawSecret == "" {
+		return ResolvedAuth{Summary: summary}
+	}
+
+	res := ResolvedAuth{Summary: summary}
+	switch authType {
+	case "api_key":
+		if in == "query" {
+			res.queryKey = keyName
+			res.queryValue = rawSecret
+		} else {
+			res.headerKey = keyName
+			res.headerValue = prefix + rawSecret
+		}
+	case "bearer":
+		val := rawSecret
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(val), strings.ToLower(strings.TrimSpace(prefix))+" ") {
+			val = prefix + val
+		}
+		res.headerKey = keyName
+		res.headerValue = val
+	case "basic":
+		val := rawSecret
+		if strings.Contains(val, ":") && !strings.HasPrefix(strings.ToLower(val), "basic ") {
+			val = base64.StdEncoding.EncodeToString([]byte(val))
+		}
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(val), strings.ToLower(strings.TrimSpace(prefix))+" ") {
+			val = prefix + val
+		}
+		res.headerKey = keyName
+		res.headerValue = val
+	}
+	return res
 }
 
 func ExtractEndpointPlaceholders(endpoint string) []string {
@@ -129,12 +257,18 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 	body := make(map[string]any)
 	queryPairs := make(map[string]string)
 	pathValues := make(map[string]string)
+	var rawHeaders map[string]string
+	var rawQuery map[string]string
+	var rawBody map[string]any
 	var missingRequired []string
 
 	if tool != nil {
 		if len(tool.PayloadTemplate) > 0 {
+			rawBody = make(map[string]any, len(tool.PayloadTemplate))
 			for k, v := range tool.PayloadTemplate {
-				body[k] = resolveTemplateAny(v, effectiveMode, req.RuntimeContext)
+				resolvedVal := resolveTemplateAny(v, effectiveMode, req.RuntimeContext)
+				body[k] = resolvedVal
+				rawBody[k] = resolvedVal
 			}
 		}
 
@@ -171,20 +305,37 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 				missingRequired = append(missingRequired, p.Key)
 			}
 
-			resolvedParams[p.Key] = val
+			displayVal := val
+			if p.IsSecret && strings.TrimSpace(val) != "" {
+				displayVal = "***"
+			}
+
+			resolvedParams[p.Key] = displayVal
 			switch p.In {
 			case "path":
 				pathValues[p.Key] = val
 			case "query":
 				if val != "" {
-					queryPairs[p.Key] = val
+					queryPairs[p.Key] = displayVal
+					if rawQuery == nil {
+						rawQuery = make(map[string]string)
+					}
+					rawQuery[p.Key] = val
 				}
 			case "header":
 				if val != "" {
-					headers[p.Key] = val
+					headers[p.Key] = displayVal
+					if rawHeaders == nil {
+						rawHeaders = make(map[string]string)
+					}
+					rawHeaders[p.Key] = val
 				}
 			case "body":
-				body[p.Key] = val
+				body[p.Key] = displayVal
+				if rawBody == nil {
+					rawBody = make(map[string]any)
+				}
+				rawBody[p.Key] = val
 			}
 		}
 	}
@@ -200,8 +351,16 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 			pathValues[k] = val
 		} else if method == "GET" || method == "DELETE" {
 			queryPairs[k] = val
+			if rawQuery == nil {
+				rawQuery = make(map[string]string)
+			}
+			rawQuery[k] = val
 		} else {
 			body[k] = val
+			if rawBody == nil {
+				rawBody = make(map[string]any)
+			}
+			rawBody[k] = val
 		}
 	}
 
@@ -218,8 +377,16 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 			pathValues[k] = val
 		} else if method == "GET" || method == "DELETE" {
 			queryPairs[k] = val
+			if rawQuery == nil {
+				rawQuery = make(map[string]string)
+			}
+			rawQuery[k] = val
 		} else {
 			body[k] = val
+			if rawBody == nil {
+				rawBody = make(map[string]any)
+			}
+			rawBody[k] = val
 		}
 	}
 
@@ -240,6 +407,13 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		}
 	}
 
+	var authSummary *AuthSummary
+	resolvedAuth := ResolveToolAuth(tool, req.RuntimeAuth)
+	if resolvedAuth.Summary.Type != "none" {
+		s := resolvedAuth.Summary
+		authSummary = &s
+	}
+
 	return ResolvedToolRequest{
 		Method:          method,
 		URL:             resolvedURL,
@@ -247,6 +421,10 @@ func BuildToolRequest(tool *ToolDefinition, req ExecutionRequest) ResolvedToolRe
 		Params:          resolvedParams,
 		Headers:         headers,
 		Body:            body,
+		Auth:            authSummary,
 		MissingRequired: missingRequired,
+		rawHeaders:      rawHeaders,
+		rawQuery:        rawQuery,
+		rawBody:         rawBody,
 	}
 }

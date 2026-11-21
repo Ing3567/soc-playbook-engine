@@ -57,6 +57,8 @@ type ExecutionRequest struct {
 	InputPayload   map[string]string `json:"input_payload,omitempty"`
 	RuntimeInputs  map[string]string `json:"runtime_inputs,omitempty"`
 	RuntimeContext map[string]any    `json:"runtime_context,omitempty"`
+	RuntimeAuth    string            `json:"runtime_auth,omitempty"`
+	ExecutionMode  string            `json:"execution_mode,omitempty"`
 }
 
 type ExecutionResult struct {
@@ -73,6 +75,15 @@ type ExportRequest struct {
 	Edges []Edge `json:"edges"`
 }
 
+type ToolAuth struct {
+	Type         string `json:"type" bson:"type"`
+	In           string `json:"in,omitempty" bson:"in,omitempty"`
+	KeyName      string `json:"key_name,omitempty" bson:"key_name,omitempty"`
+	Prefix       string `json:"prefix,omitempty" bson:"prefix,omitempty"`
+	EnvVar       string `json:"env_var,omitempty" bson:"env_var,omitempty"`
+	AllowRuntime bool   `json:"allow_runtime,omitempty" bson:"allow_runtime,omitempty"`
+}
+
 type ToolParameter struct {
 	Key          string `json:"key" bson:"key"`
 	Label        string `json:"label,omitempty" bson:"label,omitempty"`
@@ -81,6 +92,7 @@ type ToolParameter struct {
 	Value        string `json:"value,omitempty" bson:"value,omitempty"`
 	DefaultValue string `json:"default_value,omitempty" bson:"default_value,omitempty"`
 	Required     bool   `json:"required,omitempty" bson:"required,omitempty"`
+	IsSecret     bool   `json:"is_secret,omitempty" bson:"is_secret,omitempty"`
 }
 
 type ToolDefinition struct {
@@ -93,6 +105,8 @@ type ToolDefinition struct {
 	HTTPMethod      string          `json:"http_method,omitempty" bson:"http_method,omitempty"`
 	Endpoint        string          `json:"endpoint,omitempty" bson:"endpoint,omitempty"`
 	PayloadMode     string          `json:"payload_mode,omitempty" bson:"payload_mode,omitempty"`
+	Auth            *ToolAuth       `json:"auth,omitempty" bson:"auth,omitempty"`
+	AuthConfigured  bool            `json:"auth_configured" bson:"-"`
 	Params          []ToolParameter `json:"params,omitempty" bson:"params,omitempty"`
 	PayloadTemplate map[string]any  `json:"payload_template,omitempty" bson:"payload_template,omitempty"`
 	MockOutput      map[string]any  `json:"mock_output,omitempty" bson:"mock_output,omitempty"`

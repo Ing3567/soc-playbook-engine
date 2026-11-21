@@ -151,6 +151,19 @@ func RunSandboxStep(req ExecutionRequest, toolDef *ToolDefinition) ExecutionResu
 				if len(resolved.Body) > 0 {
 					output["body_payload"] = resolved.Body
 				}
+				if resolved.Auth != nil && resolved.Auth.Type != "none" {
+					switch resolved.Auth.Source {
+					case "env":
+						output["auth_status"] = fmt.Sprintf("configured (env: %s)", resolved.Auth.EnvVar)
+					case "runtime":
+						output["auth_status"] = "configured (session key)"
+					default:
+						output["auth_status"] = "not configured (sandbox mode)"
+					}
+					if resolved.Auth.MaskedPreview != "" {
+						output["auth_preview"] = resolved.Auth.MaskedPreview
+					}
+				}
 			}
 		}
 	}
