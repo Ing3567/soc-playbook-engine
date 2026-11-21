@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +11,10 @@ import (
 
 func main() {
 	LoadEnvConfig()
+
+	if Config.AuthEnabled && strings.TrimSpace(Config.AuthSecret) == "" {
+		log.Println("WARNING: AUTH_ENABLED=true without AUTH_SECRET; using ephemeral secret (tokens reset on restart)")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -29,12 +34,28 @@ func main() {
 		log.Fatalf("Scenario seeding error: %v", err)
 	}
 
+	userRepo := NewUserRepository(repo.Database())
+	if err := userRepo.EnsureIndexesAndSeedUsers(
+		ctx,
+		Config.SeedInstructorUser,
+		Config.SeedInstructorPass,
+		Config.SeedTraineeUser,
+		Config.SeedTraineePass,
+	); err != nil {
+		log.Fatalf("User seeding error: %v", err)
+	}
+
+	runRepo := NewRunRepository(repo.Database())
+	if err := runRepo.EnsureIndexes(ctx); err != nil {
+		log.Fatalf("Run index setup error: %v", err)
+	}
+
 	router := gin.Default()
 	if err := router.SetTrustedProxies(Config.TrustedProxies); err != nil {
 		log.Fatalf("Invalid TRUSTED_PROXIES config: %v", err)
 	}
 	router.Use(CORSMiddleware(Config.AllowedOrigins))
-	handler := NewApiHandler(repo, toolRepo, scenarioRepo)
+	handler := NewApiHandler(repo, toolRepo, scenarioRepo, userRepo, runRepo)
 	handler.RegisterRoutes(router)
 
 	if err := router.Run(":" + Config.Port); err != nil {

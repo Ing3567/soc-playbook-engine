@@ -16,36 +16,69 @@ type ApiHandler struct {
 	repo         *PlaybookRepository
 	toolRepo     *ToolRepository
 	scenarioRepo *ScenarioRepository
+	userRepo     *UserRepository
+	runRepo      *RunRepository
 }
 
-func NewApiHandler(repo *PlaybookRepository, toolRepo *ToolRepository, scenarioRepo *ScenarioRepository) *ApiHandler {
-	return &ApiHandler{repo: repo, toolRepo: toolRepo, scenarioRepo: scenarioRepo}
+func NewApiHandler(
+	repo *PlaybookRepository,
+	toolRepo *ToolRepository,
+	scenarioRepo *ScenarioRepository,
+	userRepo *UserRepository,
+	runRepo *RunRepository,
+) *ApiHandler {
+	return &ApiHandler{
+		repo:         repo,
+		toolRepo:     toolRepo,
+		scenarioRepo: scenarioRepo,
+		userRepo:     userRepo,
+		runRepo:      runRepo,
+	}
 }
 
 func (h *ApiHandler) RegisterRoutes(r *gin.Engine) {
 	generateLimiter := NewIPRateLimiter(15, 5)
 	executeLimiter := NewIPRateLimiter(60, 20)
+	authLimiter := NewIPRateLimiter(10, 5)
 
+	authReq := RequireAuthMiddleware()
+	instructorReq := RequireInstructorMiddleware()
+
+	// Public endpoints
 	r.GET("/api/health", h.HealthCheck)
 	r.GET("/api/config", h.GetRuntimeConfig)
-	r.POST("/api/generate", RateLimitMiddleware(generateLimiter), h.GenerateFlowchart)
-	r.GET("/api/sops", h.ListPlaybooks)
-	r.POST("/api/sops", h.SavePlaybook)
-	r.DELETE("/api/sops/:id", h.DeletePlaybook)
-	r.GET("/api/tools", h.ListTools)
-	r.POST("/api/tools", h.CreateTool)
-	r.POST("/api/tools/test", h.TestToolDraft)
-	r.PUT("/api/tools/:id", h.UpdateTool)
-	r.DELETE("/api/tools/:id", h.DeleteTool)
-	r.GET("/api/scenarios", h.ListScenarios)
-	r.GET("/api/scenarios/:id", h.GetScenario)
-	r.POST("/api/scenarios", h.CreateScenario)
-	r.PUT("/api/scenarios/:id", h.UpdateScenario)
-	r.DELETE("/api/scenarios/:id", h.DeleteScenario)
-	r.POST("/api/execute", RateLimitMiddleware(executeLimiter), h.ExecuteStep)
-	r.POST("/api/export/bpmn", h.ExportBpmn)
-	r.POST("/api/export/cacao", h.ExportCacao)
-	r.POST("/api/export/markdown", h.ExportMarkdown)
+	r.POST("/api/auth/login", RateLimitMiddleware(authLimiter), h.Login)
+	r.POST("/api/auth/register", RateLimitMiddleware(authLimiter), OptionalAuthMiddleware(), h.Register)
+
+	// Authenticated endpoints (trainee & instructor)
+	r.GET("/api/auth/me", authReq, h.GetMe)
+	r.GET("/api/sops", authReq, h.ListPlaybooks)
+	r.GET("/api/tools", authReq, h.ListTools)
+	r.GET("/api/scenarios", authReq, h.ListScenarios)
+	r.GET("/api/scenarios/:id", authReq, h.GetScenario)
+
+	r.POST("/api/runs", authReq, h.StartRun)
+	r.GET("/api/runs", authReq, h.ListRuns)
+	r.GET("/api/runs/:id", authReq, h.GetRun)
+	r.POST("/api/runs/:id/steps/:nodeId", authReq, RateLimitMiddleware(executeLimiter), h.ExecuteRunStep)
+	r.POST("/api/runs/:id/complete", authReq, h.CompleteRun)
+
+	r.POST("/api/execute", authReq, RateLimitMiddleware(executeLimiter), h.ExecuteStep)
+	r.POST("/api/export/bpmn", authReq, h.ExportBpmn)
+	r.POST("/api/export/cacao", authReq, h.ExportCacao)
+	r.POST("/api/export/markdown", authReq, h.ExportMarkdown)
+
+	// Instructor-only authoring endpoints
+	r.POST("/api/generate", authReq, instructorReq, RateLimitMiddleware(generateLimiter), h.GenerateFlowchart)
+	r.POST("/api/sops", authReq, instructorReq, h.SavePlaybook)
+	r.DELETE("/api/sops/:id", authReq, instructorReq, h.DeletePlaybook)
+	r.POST("/api/tools", authReq, instructorReq, h.CreateTool)
+	r.POST("/api/tools/test", authReq, instructorReq, h.TestToolDraft)
+	r.PUT("/api/tools/:id", authReq, instructorReq, h.UpdateTool)
+	r.DELETE("/api/tools/:id", authReq, instructorReq, h.DeleteTool)
+	r.POST("/api/scenarios", authReq, instructorReq, h.CreateScenario)
+	r.PUT("/api/scenarios/:id", authReq, instructorReq, h.UpdateScenario)
+	r.DELETE("/api/scenarios/:id", authReq, instructorReq, h.DeleteScenario)
 }
 
 func (h *ApiHandler) HealthCheck(c *gin.Context) {
@@ -65,6 +98,7 @@ func (h *ApiHandler) HealthCheck(c *gin.Context) {
 func (h *ApiHandler) GetRuntimeConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"allow_live_execution": Config.AllowLiveExecution,
+		"auth_enabled":         Config.AuthEnabled,
 	})
 }
 
@@ -320,6 +354,9 @@ func (h *ApiHandler) DeletePlaybook(c *gin.Context) {
 }
 
 func shouldHideScenarioAnswers(c *gin.Context) bool {
+	if claims, ok := GetAuthClaims(c); ok && claims.Role != "instructor" {
+		return true
+	}
 	raw := strings.ToLower(strings.TrimSpace(c.Query("hide_answers")))
 	return raw == "true" || raw == "1" || raw == "yes"
 }
@@ -476,6 +513,10 @@ func (h *ApiHandler) ExecuteStep(c *gin.Context) {
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(req.ExecutionMode), "live") {
+		if claims, ok := GetAuthClaims(c); Config.AuthEnabled && (!ok || claims.Role != "instructor") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Live API execution อนุญาตเฉพาะ Instructor เท่านั้น"})
+			return
+		}
 		c.JSON(http.StatusOK, RunLiveHTTPStep(req, toolDef))
 		return
 	}

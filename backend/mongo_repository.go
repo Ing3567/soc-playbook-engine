@@ -67,6 +67,21 @@ func (r *PlaybookRepository) ListAll(ctx context.Context) ([]PlaybookDocument, e
 	return items, nil
 }
 
+func (r *PlaybookRepository) GetByID(ctx context.Context, id string) (*PlaybookDocument, error) {
+	var doc PlaybookDocument
+	err := r.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrPlaybookNotFound
+		}
+		return nil, err
+	}
+	for j := range doc.Nodes {
+		doc.Nodes[j].Tool = NormalizeLegacyToolID(doc.Nodes[j].Tool)
+	}
+	return &doc, nil
+}
+
 func (r *PlaybookRepository) SaveOne(ctx context.Context, doc PlaybookDocument) (PlaybookDocument, error) {
 	if strings.TrimSpace(doc.Title) == "" {
 		doc.Title = "Untitled SOP"
